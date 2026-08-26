@@ -45,6 +45,17 @@ be overridden for this operation alone.
 - **WHEN** `dictionary.source` or `dictionary.target` is configured
 - **THEN** the lookup uses those rather than the session language pair
 
+### Requirement: History Follows The Word
+
+The system SHALL track the looked-up word's line, so that revisiting the entry
+later jumps to where the word is rather than to the row it occupied at lookup
+time.
+
+#### Scenario: Lines inserted above during the lookup
+
+- **WHEN** text is inserted above the word while the lookup is running
+- **THEN** the history entry jumps to the word's new line
+
 ### Requirement: Shared Job Handling
 
 The system SHALL run the dictionary process through the same job runner as

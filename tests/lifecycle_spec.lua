@@ -333,3 +333,117 @@ T.test("a build_command returning a non-command is reported, not thrown", functi
     "expected an explanatory error, got: " .. table.concat(messages, " ")
   )
 end)
+
+--- Third audit pass: the language ops were never touched by the earlier fixes
+--- and carried the same class of defect.
+
+--- @param lines string[]
+--- @param first number
+--- @param last number
+--- @return number buf
+local function select_lines(lines, first, last)
+  local buf = vim.api.nvim_create_buf(true, false)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.api.nvim_win_set_buf(0, buf)
+  vim.api.nvim_win_set_cursor(0, { first, 0 })
+  vim.cmd("normal! v")
+  if last > first then
+    vim.cmd("normal! " .. (last - first) .. "j")
+  end
+  vim.cmd("normal! $")
+  return buf
+end
+
+local function language_setup()
+  gerty.setup({
+    providers = { lm = { type = "lmstudio", models = { "m" } } },
+    op_defaults = { translate = "lm", gloss = "lm" },
+  })
+end
+
+local function a_reply()
+  return {
+    status = "ok",
+    output = T.chat_response(
+      vim.json.encode({ translation = " done", grammar_notes = " done" })
+    ),
+  }
+end
+
+T.test("translate signs follow the text when lines are inserted above", function()
+  language_setup()
+  local mock = T.mock_jobs()
+  mock.delay = 40
+  mock.reply = a_reply()
+  local buf = select_lines({ "above", "eins", "zwei", "below" }, 2, 3)
+  T.capture_notify(function()
+    gerty.translate({ refresh = true })
+    vim.api.nvim_buf_set_lines(buf, 0, 0, false, { "inserted" })
+    T.wait_for(function() return false end, 400)
+  end)
+  local ns = vim.api.nvim_get_namespaces()["gerty.translated"]
+  local rows = {}
+  for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, {})) do
+    table.insert(rows, mark[2])
+  end
+  T.eq(table.concat(rows, ","), "2,3", "signs must land on the text, not its old rows")
+  T.unmock_jobs(mock)
+end)
+
+T.test("translate survives its selection being deleted mid-request", function()
+  language_setup()
+  local mock = T.mock_jobs()
+  mock.delay = 40
+  mock.reply = a_reply()
+  local buf = select_lines({ "above", "middle", "eins", "zwei" }, 3, 4)
+  T.capture_notify(function()
+    gerty.translate({ refresh = true })
+    vim.api.nvim_buf_set_lines(buf, 2, 4, false, {})
+    T.wait_for(function() return false end, 400)
+  end)
+  -- the answer is still shown; only the buffer-pointing parts are skipped
+  local entry = require("gerty.history").list()[1]
+  T.ok(entry, "the lookup is still recorded")
+  T.eq(entry.start_row, nil, "no row is recorded for text that is gone")
+  T.unmock_jobs(mock)
+end)
+
+T.test("gloss whose selection is deleted while the prompt is open is caught", function()
+  language_setup()
+  local mock = T.mock_jobs()
+  local buf = select_lines({ "above", "middle", "eins", "zwei" }, 3, 4)
+  local submit
+  local original = vim.ui.input
+  vim.ui.input = function(_, on_confirm) submit = on_confirm end
+  gerty.gloss()
+  vim.ui.input = original
+  T.ok(submit, "the prompt should have opened")
+
+  vim.api.nvim_buf_set_lines(buf, 2, 4, false, {})
+  local messages = T.capture_notify(function()
+    submit("")
+    T.wait_for(function() return false end, 200)
+  end)
+  T.eq(mock.calls, 0, "nothing may be sent for a selection that is gone")
+  T.ok(#messages > 0, "the user is told why")
+  T.unmock_jobs(mock)
+end)
+
+T.test("word() history follows the word when lines are inserted above", function()
+  gerty.setup({ providers = { pi = { models = { "m" } } } })
+  local mock = T.mock_jobs()
+  mock.delay = 40
+  mock.reply = { status = "ok", output = "a definition" }
+  local buf = vim.api.nvim_create_buf(true, false)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "above", "Wort", "below" })
+  vim.api.nvim_win_set_buf(0, buf)
+  vim.api.nvim_win_set_cursor(0, { 2, 0 })
+  T.capture_notify(function()
+    gerty.word({ refresh = true })
+    vim.api.nvim_buf_set_lines(buf, 0, 0, false, { "inserted" })
+    T.wait_for(function() return false end, 400)
+  end)
+  local entry = require("gerty.history").list()[1]
+  T.eq(entry.start_row, 3, "history must jump to where the word actually is")
+  T.unmock_jobs(mock)
+end)

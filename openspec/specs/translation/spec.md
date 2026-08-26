@@ -61,6 +61,23 @@ The system SHALL preserve quotation marks in translated dialogue.
 - **WHEN** a passage of novel dialogue is translated on a chat provider
 - **THEN** the quotation marks survive into the answer rather than being dropped or truncating it
 
+### Requirement: Marks And History Follow The Text
+
+The system SHALL track the selected range from the moment it is captured, so
+that the persistent marks and the history entry point at the text itself rather
+than at the rows it occupied when the request started.
+
+#### Scenario: Lines inserted above during the request
+
+- **WHEN** text is inserted above the selection while a translation is in flight
+- **THEN** the marks land on the translated lines at their new position
+
+#### Scenario: The selection is deleted during the request
+
+- **WHEN** the selected lines are deleted before the answer arrives
+- **THEN** the answer is still shown, because it is still worth reading
+- **AND** no marks are placed and the history entry records no position to jump to
+
 ### Requirement: Buffer Is Never Modified
 
 The system SHALL show the translation in a float and SHALL never write it into

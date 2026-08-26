@@ -367,8 +367,32 @@ local function resolve_range(range)
   return start_row, end_row
 end
 
+--- @type fun(range: gerty.Range|nil)
+local release_range
+
+--- Brings a captured selection's row numbers back into line with where its
+--- text actually is now, so the dim highlight, the spinners and the signs all
+--- land on the right lines. Returns false when the selection is gone, which is
+--- the only case the caller cannot proceed from.
+--- @param sel gerty.Selection
+--- @param verb string named in the message when the selection is gone
+--- @return boolean
+local function refresh_selection(sel, verb)
+  local start_row, end_row = resolve_range(sel.range)
+  if not start_row then
+    release_range(sel.range)
+    vim.notify(
+      string.format("gerty: %s, nothing to %s", tostring(end_row), verb),
+      vim.log.levels.WARN
+    )
+    return false
+  end
+  sel.start_row, sel.end_row = start_row + 1, end_row + 1
+  return true
+end
+
 --- @param range gerty.Range|nil
-local function release_range(range)
+function release_range(range)
   if range and vim.api.nvim_buf_is_valid(range.buf) then
     pcall(vim.api.nvim_buf_del_extmark, range.buf, marks_ns, range.mark)
   end
@@ -393,7 +417,12 @@ end
 --- @param start_row number 1-indexed inclusive
 --- @param end_row number 1-indexed inclusive
 local function mark_translated(buf, start_row, end_row)
-  if not vim.api.nvim_buf_is_valid(buf) then
+  if not vim.api.nvim_buf_is_valid(buf) or not vim.api.nvim_buf_is_loaded(buf) then
+    return
+  end
+  -- the lines can have gone away between the request and its answer
+  local total = vim.api.nvim_buf_line_count(buf)
+  if start_row > total or end_row > total or start_row < 1 then
     return
   end
   vim.api.nvim_buf_clear_namespace(buf, translated_ns, start_row - 1, end_row)
@@ -495,6 +524,25 @@ end
 
 --- Also reached from completion callbacks, by which time the buffer may have
 --- been closed -- so an invalid id is a name, not an error.
+--- Captures the visual selection for a language op and starts tracking it, so
+--- the rows stay right while the user types an instruction and while the
+--- request is in flight.
+--- @return gerty.Selection|nil
+local function capture_language_selection()
+  local sel = selection.capture_visual()
+  selection.exit_visual()
+  if not sel or vim.trim(sel.text) == "" then
+    vim.notify("gerty: empty selection", vim.log.levels.WARN)
+    return nil
+  end
+  sel.range = track_range(sel.buf, sel.start_row, sel.end_row)
+  if not sel.range then
+    vim.notify("gerty: empty selection", vim.log.levels.WARN)
+    return nil
+  end
+  return sel
+end
+
 --- @param buf number
 --- @return string
 local function buffer_name(buf)
@@ -858,14 +906,24 @@ local function run_language_op(
         return
       end
       cache.set(cache_key, result.output)
-      mark_translated(sel.buf, sel.start_row, sel.end_row)
+      -- The answer is still worth reading even if the text moved or went
+      -- away, so the float is shown either way. Only the things that point AT
+      -- the buffer -- the signs and the history jump -- need current rows, and
+      -- they are simply skipped when there is no longer a range to point at.
+      local start_row, end_row = resolve_range(sel.range)
+      release_range(sel.range)
+      if start_row then
+        mark_translated(sel.buf, start_row + 1, end_row + 1)
+      end
       history.record({
         op = op,
         label = history_label,
         cache_key = cache_key,
-        buf = sel.buf,
-        start_row = sel.start_row,
-        end_row = sel.end_row,
+        buf = start_row and sel.buf or nil,
+        start_row = start_row and (start_row + 1) or nil,
+        -- guard on start_row, not end_row: resolve_range returns the REASON
+        -- in the second slot when it fails, and a string will not add
+        end_row = start_row and (end_row + 1) or nil,
       })
     end,
   })
@@ -881,6 +939,9 @@ end
 --- @param sel gerty.Selection
 --- @param opts table
 local function do_translate(sel, opts)
+  if not refresh_selection(sel, "translate") then
+    return
+  end
   local provider = pick_provider("translate", opts.provider)
   local lang = language_for(opts)
   local before, after = selection.context(sel, lang.context_lines)
@@ -908,6 +969,7 @@ local function do_translate(sel, opts)
     local cached = cache.get(cache_key)
     if cached then
       mark_translated(sel.buf, sel.start_row, sel.end_row)
+      release_range(sel.range)
       history.record({
         op = "translate",
         label = history_label,
@@ -947,6 +1009,10 @@ end
 --- @param instruction string blank means "the default grammar breakdown"
 --- @param opts table
 local function do_gloss(sel, instruction, opts)
+  -- gloss opens a prompt, so the buffer can have moved on since the selection
+  if not refresh_selection(sel, "gloss") then
+    return
+  end
   local alias, rest = split_alias(instruction)
   instruction = rest
   local provider = pick_provider("gloss", alias or opts.provider)
@@ -981,6 +1047,7 @@ local function do_gloss(sel, instruction, opts)
     local cached = cache.get(cache_key)
     if cached then
       mark_translated(sel.buf, sel.start_row, sel.end_row)
+      release_range(sel.range)
       history.record({
         op = "gloss",
         label = history_label,
@@ -1113,10 +1180,8 @@ end
 function M.translate(opts)
   assert(cfg, "gerty: call require('gerty').setup() first")
   opts = opts or {}
-  local sel = selection.capture_visual()
-  selection.exit_visual()
-  if not sel or vim.trim(sel.text) == "" then
-    vim.notify("gerty: empty selection", vim.log.levels.WARN)
+  local sel = capture_language_selection()
+  if not sel then
     return
   end
   do_translate(sel, opts)
@@ -1132,10 +1197,8 @@ function M.gloss(opts)
   opts = opts or {}
   -- capture before anything else: once the prompt opens, visual mode is gone
   -- and the selection is unreadable
-  local sel = selection.capture_visual()
-  selection.exit_visual()
-  if not sel or vim.trim(sel.text) == "" then
-    vim.notify("gerty: empty selection", vim.log.levels.WARN)
+  local sel = capture_language_selection()
+  if not sel then
     return
   end
 
@@ -1146,6 +1209,7 @@ function M.gloss(opts)
 
   input_with_hint("Gloss: ", function(instruction)
     if instruction == nil then
+      release_range(sel.range)
       return
     end
     do_gloss(sel, instruction, opts)
@@ -1175,19 +1239,28 @@ function M.word(opts)
     cache.key({ "word", word, source, target, table.concat(cfg.dictionary.command, " ") })
   local buf = vim.api.nvim_get_current_buf()
   local line = vim.api.nvim_win_get_cursor(0)[1]
-  local history_entry = {
-    op = "word",
-    label = title,
-    cache_key = cache_key,
-    buf = buf,
-    start_row = line,
-    end_row = line,
-  }
+  -- tracked, not fixed: editing above the word while the lookup runs would
+  -- otherwise make its history entry jump to the wrong line afterwards
+  local range = track_range(buf, line, line)
+
+  --- @return table
+  local function history_entry()
+    local start_row = range and select(1, resolve_range(range)) or nil
+    return {
+      op = "word",
+      label = title,
+      cache_key = cache_key,
+      buf = start_row and buf or nil,
+      start_row = start_row and (start_row + 1) or nil,
+      end_row = start_row and (start_row + 1) or nil,
+    }
+  end
 
   if not opts.refresh then
     local cached = cache.get(cache_key)
     if cached then
-      history.record(history_entry)
+      history.record(history_entry())
+      release_range(range)
       float.show(title .. " (cached)", cached)
       return
     end
@@ -1226,7 +1299,8 @@ function M.word(opts)
       end
       float.show(title, text)
       cache.set(cache_key, text)
-      history.record(history_entry)
+      history.record(history_entry())
+      release_range(range)
     end,
   })
 
