@@ -90,6 +90,9 @@ function M.open(lines)
     noautocmd = true,
   })
   if not opened then
+    -- the buffer exists already; `bufhidden = "wipe"` only fires for a buffer
+    -- that was displayed, so nothing else will collect it
+    pcall(vim.api.nvim_buf_delete, buf, { force = true })
     return function() end
   end
 

@@ -338,6 +338,32 @@ function M.resolve(opts)
     )
   end
 
+  -- A wrong type here is accepted silently and then fails deep inside an
+  -- operation, as arithmetic on a string or a concat of a number. Catching it
+  -- at setup() is the whole point of validating anything here.
+  local function check(value, want, what)
+    assert(
+      type(value) == want,
+      string.format(
+        "gerty: config.%s must be a %s, got %s",
+        what,
+        want,
+        type(value)
+      )
+    )
+  end
+  check(cfg.context_lines, "number", "context_lines")
+  check(cfg.spinner_interval, "number", "spinner_interval")
+  check(cfg.language.context_lines, "number", "language.context_lines")
+  check(cfg.language.source, "string", "language.source")
+  check(cfg.language.target, "string", "language.target")
+  check(cfg.language.learner_level, "string", "language.learner_level")
+  check(cfg.dictionary.command, "table", "dictionary.command")
+  assert(
+    #cfg.dictionary.command > 0,
+    "gerty: config.dictionary.command must not be empty"
+  )
+
   for _, preset in ipairs(cfg.language_presets) do
     assert(
       type(preset) == "table" and preset.source and preset.target,

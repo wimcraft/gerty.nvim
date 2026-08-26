@@ -151,6 +151,12 @@ unexpected response shape, and a technically valid but empty answer.
 - **WHEN** a chat request fails
 - **THEN** the error message includes the endpoint that was addressed
 
+#### Scenario: A truncated answer is a failure
+
+- **WHEN** the server reports that generation stopped at the token limit
+- **THEN** the result is an error naming that reason, rather than a successful partial answer
+- **AND** this matters most for a code replacement, where a partial answer looks valid and would be written into the buffer
+
 #### Scenario: Empty answer
 
 - **WHEN** the response decodes correctly but the answer is empty after trimming

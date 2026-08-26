@@ -172,19 +172,35 @@ function M.decode_openai(raw, provider, prompt)
       error = "malformed JSON response from " .. tostring(provider.endpoint),
     }
   end
-  if type(resp.error) == "table" and resp.error.message then
+  --- Every failure names the endpoint it came from: with several providers
+  --- configured, "empty response" on its own does not say which one.
+  --- @param message string
+  --- @return gerty.JobResult
+  local function fail(message)
     return {
       status = "error",
       output = raw,
-      error = tostring(resp.error.message),
+      error = string.format("%s (endpoint %s)", message, tostring(provider.endpoint)),
     }
+  end
+
+  if type(resp.error) == "table" and resp.error.message then
+    return fail(tostring(resp.error.message))
   end
 
   local choice = type(resp.choices) == "table" and resp.choices[1] or nil
   local message = type(choice) == "table" and choice.message or nil
   local content = type(message) == "table" and message.content or nil
   if type(content) ~= "string" then
-    return { status = "error", output = raw, error = "unexpected response shape" }
+    return fail("unexpected response shape")
+  end
+
+  -- A response cut off at the token limit is not a successful answer. It
+  -- matters most for `replace`, where accepting it writes half a statement
+  -- into the buffer -- valid-looking, silently truncated, and indistinguishable
+  -- from what the model meant to say.
+  if choice.finish_reason == "length" then
+    return fail("response was cut off at the model's token limit")
   end
 
   -- Unwrap the schema's payload field. A server that ignored `response_format`
@@ -212,7 +228,7 @@ function M.decode_openai(raw, provider, prompt)
   end
 
   if content == "" then
-    return { status = "error", output = raw, error = "empty response" }
+    return fail("empty response")
   end
   return { status = "ok", output = content }
 end
@@ -245,7 +261,15 @@ local function send_openai(provider, prompt, opts)
     }
   end
   payload.chat_template_kwargs = provider.chat_template_kwargs
-  local body = vim.json.encode(payload)
+  -- chat_template_kwargs comes from user config and need not be encodable;
+  -- the caller has a spinner up by now, so this cannot be allowed to throw
+  local encoded, body = pcall(vim.json.encode, payload)
+  if not encoded then
+    return jobs.fail(
+      "could not encode the request body: " .. tostring(body),
+      opts.on_exit
+    )
+  end
 
   local cmd, build_error = build(provider, { read_only = opts.read_only })
   if not cmd then

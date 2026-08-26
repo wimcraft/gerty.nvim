@@ -173,10 +173,13 @@ T.test("failures say which kind they were", function()
   T.eq(malformed.status, "error")
   T.ok(malformed.error:find("malformed JSON", 1, true))
 
+  -- every failure names the endpoint: with several providers configured,
+  -- "empty response" on its own does not say which one produced it
   local api_error = transport.decode_openai(
     vim.json.encode({ error = { message = "model not loaded" } }), lm, {}
   )
-  T.eq(api_error.error, "model not loaded")
+  T.ok(api_error.error:find("model not loaded", 1, true))
+  T.ok(api_error.error:find("localhost:1234", 1, true), "endpoint not named")
 
   local wrong_shape = transport.decode_openai(vim.json.encode({ nope = true }), lm, {})
   T.ok(wrong_shape.error:find("unexpected response shape", 1, true))

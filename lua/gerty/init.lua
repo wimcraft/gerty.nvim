@@ -426,10 +426,19 @@ local function mark_translated(buf, start_row, end_row)
     return
   end
   vim.api.nvim_buf_clear_namespace(buf, translated_ns, start_row - 1, end_row)
-  for row = start_row - 1, end_row - 1 do
-    vim.api.nvim_buf_set_extmark(buf, translated_ns, row, 0, {
+  local lines = vim.api.nvim_buf_get_lines(buf, start_row - 1, end_row, false)
+  for i, line in ipairs(lines) do
+    vim.api.nvim_buf_set_extmark(buf, translated_ns, start_row - 2 + i, 0, {
       sign_text = "▎",
       sign_hl_group = "DiagnosticHint",
+      -- Each sign spans its own line rather than sitting at column 0, because
+      -- `invalidate` only fires when the whole covered range is deleted and a
+      -- zero-width mark has no range to delete. Without it the sign relocates
+      -- onto whatever line moves up, claiming text was translated when it was
+      -- not.
+      end_row = start_row - 2 + i,
+      end_col = #line,
+      invalidate = true,
     })
   end
 end
@@ -674,6 +683,14 @@ local function do_replace(range, instruction, model, provider_name)
       release_range(range)
 
       if result.status == "cancelled" then
+        -- cancellation resolves the job before SIGTERM lands, so a provider
+        -- slow to die (or ignoring it) can write the temp path again after the
+        -- removal above. Sweep once more, later.
+        if tmp_file then
+          vim.defer_fn(function()
+            pcall(os.remove, tmp_file)
+          end, 2000)
+        end
         return
       end
       if result.status == "error" then
@@ -1121,13 +1138,17 @@ function M.replace(opts)
     return
   end
 
-  input_with_hint("Replace: ", function(instruction)
+  local prompted, err = pcall(input_with_hint, "Replace: ", function(instruction)
     if instruction and vim.trim(instruction) ~= "" then
       do_replace(range, instruction, opts.model, opts.provider)
     else
       release_range(range)
     end
   end)
+  if not prompted then
+    release_range(range)
+    error(err, 0)
+  end
 end
 
 --- Ask a question about the current visual selection. The model may read the
@@ -1151,7 +1172,7 @@ function M.explain(opts)
     return
   end
 
-  input_with_hint("Explain: ", function(instruction)
+  local prompted, err = pcall(input_with_hint, "Explain: ", function(instruction)
     if instruction == nil then
       release_range(range)
       return
@@ -1162,6 +1183,10 @@ function M.explain(opts)
     end
     do_explain(range, instruction, opts.model, opts.provider)
   end)
+  if not prompted then
+    release_range(range)
+    error(err, 0)
+  end
 end
 
 --- Send an instruction to an agentic run that may edit any file it needs to.

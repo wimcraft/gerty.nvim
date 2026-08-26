@@ -537,3 +537,118 @@ T.test("a prompt backend that throws releases the range", function()
   T.ok(not ok, "the error should propagate")
   T.eq(tracking_marks(buf), 0, "a throwing prompt leaked a mark")
 end)
+
+--- Fifth audit pass.
+
+T.test("a response cut off at the token limit is not treated as success", function()
+  local config = require("gerty.config")
+  local transport = require("gerty.transport")
+  local cfg = config.resolve({ providers = { lm = { type = "lmstudio", models = { "m" } } } })
+  local raw = vim.json.encode({
+    choices = {
+      {
+        finish_reason = "length",
+        message = { content = vim.json.encode({ replacement = "local x = incompl" }) },
+      },
+    },
+  })
+  local result = transport.decode_openai(raw, cfg.providers.lm, {
+    response_field = "replacement",
+    response_prose = false,
+  })
+  -- accepting this would write half a statement into the buffer: valid-looking,
+  -- silently truncated, indistinguishable from what the model meant to say
+  T.eq(result.status, "error")
+  T.ok(result.error:find("cut off", 1, true), "the reason must be stated")
+end)
+
+T.test("a translated sign does not survive the line it marked", function()
+  language_setup()
+  local mock = T.mock_jobs()
+  mock.delay = 20
+  mock.reply = {
+    status = "ok",
+    output = T.chat_response(vim.json.encode({ translation = " done" })),
+  }
+  local buf = select_lines({ "eins", "below" }, 1, 1)
+  T.capture_notify(function()
+    gerty.translate({ refresh = true })
+    T.wait_for(function() return false end, 250)
+  end)
+  local ns = vim.api.nvim_get_namespaces()["gerty.translated"]
+  T.eq(#vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, {}), 1, "the line should be marked")
+
+  vim.api.nvim_buf_set_lines(buf, 0, 1, false, {})
+  local live = 0
+  for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = true })) do
+    if not (mark[4] and mark[4].invalid) then
+      live = live + 1
+    end
+  end
+  T.eq(live, 0, "the sign relocated onto `below` and now claims it was translated")
+  T.unmock_jobs(mock)
+end)
+
+T.test("replace and explain release their range when the prompt backend throws", function()
+  gerty.setup({ providers = { pi = { models = { "m" } } } })
+  for _, op in ipairs({ "replace", "explain" }) do
+    local buf = T.buffer_with_selection({ "a", "b", "c" }, 1, 2)
+    local original = vim.ui.input
+    vim.ui.input = function()
+      error("input backend exploded")
+    end
+    local ok = pcall(gerty[op])
+    vim.ui.input = original
+    T.ok(not ok, op .. ": the error should propagate")
+    T.eq(tracking_marks(buf), 0, op .. " leaked a mark")
+  end
+end)
+
+T.test("a request body that cannot be encoded fails instead of throwing", function()
+  gerty.setup({
+    providers = {
+      lm = {
+        type = "lmstudio",
+        models = { "m" },
+        -- user config need not be JSON-encodable
+        chat_template_kwargs = { bad = function() end },
+      },
+    },
+    op_defaults = { translate = "lm" },
+  })
+  local buf = select_lines({ "eins", "zwei" }, 1, 1)
+  local messages = T.capture_notify(function()
+    gerty.translate({ refresh = true })
+    T.wait_for(function() return false end, 300)
+  end)
+  local status_ns = vim.api.nvim_get_namespaces()["gerty.status"]
+  T.eq(#vim.api.nvim_buf_get_extmarks(buf, status_ns, 0, -1, {}), 0, "spinner stranded")
+  T.eq(tracking_marks(buf), 0, "tracking mark leaked")
+  T.ok(#messages > 0, "the failure must be reported")
+end)
+
+T.test("setup rejects wrongly typed configuration", function()
+  local config = require("gerty.config")
+  T.raises(function()
+    config.resolve({ providers = { pi = {} }, language = { context_lines = "five" } })
+  end, "language.context_lines must be a number")
+  T.raises(function()
+    config.resolve({ providers = { pi = {} }, context_lines = "forty" })
+  end, "context_lines must be a number")
+  T.raises(function()
+    config.resolve({ providers = { pi = {} }, dictionary = { command = {} } })
+  end, "must not be empty")
+end)
+
+T.test("a hint window that fails to open leaves no buffer behind", function()
+  local hint = require("gerty.hint")
+  local before = #vim.api.nvim_list_bufs()
+  local original = vim.api.nvim_open_win
+  vim.api.nvim_open_win = function()
+    error("no room")
+  end
+  local close = hint.open({ "Available providers:", "  $pi (m)" })
+  vim.api.nvim_open_win = original
+  close()
+  T.eq(#vim.api.nvim_list_bufs(), before, "the scratch buffer leaked")
+end)
