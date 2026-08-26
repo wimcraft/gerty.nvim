@@ -36,16 +36,27 @@ The system SHALL, for a provider with its own file tools, instruct the model to
 write the replacement to a temporary file and to modify no other file. The
 temporary file SHALL be removed after the request resolves, on every outcome.
 
+This containment is **prompt-level, not enforced**. Writing the temporary file
+is itself a file write, so the provider's tools cannot be denied for this
+operation the way they are for `explain`. Documentation SHALL describe it as an
+instruction the model follows rather than a restriction it operates under.
+
 #### Scenario: Writing through a temp file
 
 - **WHEN** `replace` runs on a CLI provider
 - **THEN** the model is told to write the replacement, and nothing else, to a named temporary path
 - **AND** the buffer is updated from that file's contents
 
-#### Scenario: The indirection is the containment
+#### Scenario: The indirection removes the reason, not the ability
 
 - **WHEN** a model with full file access performs the edit
 - **THEN** it has no reason to touch the working tree, because the only file it was asked to write is a scratch path
+- **AND** it retains the ability to do so, which is why this is documented as prompt-level containment
+
+#### Scenario: Enforced containment is available
+
+- **WHEN** the user needs `replace` to be structurally unable to touch other files
+- **THEN** routing it to a chat-only provider achieves that, because such a provider has no tools at all
 
 #### Scenario: Temp file cleanup
 
@@ -111,7 +122,19 @@ be abandoned.
 #### Scenario: The selection is destroyed
 
 - **WHEN** the selected range is deleted before the answer arrives
-- **THEN** the user is warned that the selection was destroyed and the replace is abandoned
+- **THEN** the user is warned and the replace is abandoned
+- **AND** no other line is modified
+
+#### Scenario: Position alone is insufficient
+
+- **WHEN** the selected lines are deleted while the request is in flight
+- **THEN** the tracking marks do not disappear — they relocate to the deletion boundary — so the system SHALL also verify that the text at the tracked range is still the text that was sent
+- **AND** without that check the replacement lands on whatever moved into that position and destroys it
+
+#### Scenario: The selection is edited rather than deleted
+
+- **WHEN** the selected lines are changed while the request is in flight
+- **THEN** the replace is abandoned, because the answer describes text that no longer exists
 
 ### Requirement: Empty Or Unreadable Result
 

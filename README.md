@@ -15,10 +15,11 @@ below for what was cut.
 
 ## How it works
 
-- `replace` (visual mode): select code, describe the change, the model
-  rewrites **only that selection** — it's told to write the replacement to
-  a temp file and touch nothing else, so it can't wander off and edit other
-  files.
+- `replace` (visual mode): select code, describe the change, and only that
+  selection is rewritten in your buffer. On a CLI provider the model is *asked*
+  to write its replacement to a temp file and touch nothing else — see the
+  table below for what that does and does not guarantee. On a local chat model
+  it has no file access at all.
 - `explain` (visual mode): select code, ask a question about it. The model
   may read the **whole repository** to answer — the definitions it depends
   on, its callers, its tests — but the file-writing tools are denied at the
@@ -63,22 +64,39 @@ end up on: routed to a CLI they run with the same read-only tool denylist
 
 Four of the five model operations are constrained, and deliberately so:
 
-| op | what it can touch |
-| --- | --- |
-| `replace` | only the selected lines |
-| `explain` | reads the repo, writes nothing (file *and* shell tools denied) |
-| `translate` / `gloss` | read-only, answer opens in a float |
-| **`ask`** | **any file in the repository, with no confirmation prompt** |
+| op | your buffer | the rest of your files |
+| --- | --- | --- |
+| `explain` | never written | **enforced**: file *and* shell tools denied at the CLI |
+| `translate` / `gloss` | never written | **enforced**: same denylist |
+| `replace` | only the selected lines | **prompt-level only** on a CLI provider; enforced on a chat model, which has no tools |
+| **`ask`** | not written directly | **unrestricted, no confirmation** |
 
-`ask` runs your provider's CLI with its approval prompts disabled —
-`claude --dangerously-skip-permissions`, `pi --approve` — because being asked
-to confirm inside a `--print` subprocess you cannot see is not something you
-can answer. That makes it exactly as powerful as running that CLI yourself in
-the repo, which is the point of it; it also means it can edit anything, and
-you will not be asked first.
+Two of those deserve spelling out.
 
-If that is not what you want, don't map `ask`. The other four operations do
-not use those flags and are unaffected.
+**`replace` containment is a request, not a sandbox.** The temp-file protocol
+means a well-behaved model has no reason to touch anything else, and in
+practice they don't. But a CLI provider still runs `replace` with its tools
+available — it has to, since writing the temp file *is* a file write — so the
+"touch nothing else" part is an instruction the model follows, not a
+restriction it operates under. A model that misbehaves, or is talked into
+misbehaving by text inside the code you selected, can write elsewhere. If you
+want `replace` to be structurally unable to do that, point it at a local chat
+model: those have no tools at all, and the replacement comes back as text.
+
+**`ask` runs with approval prompts disabled** — `claude
+--dangerously-skip-permissions`, `pi --approve` — because being asked to
+confirm inside a `--print` subprocess you cannot see is not something you can
+answer. That makes it exactly as powerful as running that CLI yourself, which
+is the point of it; it also means it can edit anything, and you will not be
+asked first.
+
+It also inherits Neovim's **current working directory**, not the project root
+of the file you happen to be editing. If you started `nvim` from your home
+directory, that is the directory `ask` is told it is working in. Check `:pwd`
+before using it on anything you care about.
+
+If that is not what you want, don't map `ask`. `explain`, `translate` and
+`gloss` do not use those flags and are unaffected.
 
 ## Install
 
@@ -398,7 +416,7 @@ was caught.
 make test        # or: nvim -l tests/run.lua
 ```
 
-56 tests, about a second, no dependencies — the suite needs nothing the plugin
+62 tests, a few seconds, no dependencies — the suite needs nothing the plugin
 doesn't already need. Subprocesses are mocked, so nothing is spawned and no
 model is called.
 

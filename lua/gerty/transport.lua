@@ -223,7 +223,11 @@ local function send_openai(provider, prompt, opts)
   payload.chat_template_kwargs = provider.chat_template_kwargs
   local body = vim.json.encode(payload)
 
-  local cmd = provider.build_command(provider, { read_only = opts.read_only })
+  local built, cmd =
+    pcall(provider.build_command, provider, { read_only = opts.read_only })
+  if not built then
+    return jobs.fail(tostring(cmd), opts.on_exit)
+  end
 
   return jobs.spawn(cmd, {
     stdin = body,
@@ -260,6 +264,10 @@ local function for_call(provider, model)
   return vim.tbl_extend("keep", { model = model }, provider)
 end
 
+--- Never throws. Every failure -- including a custom provider whose
+--- `build_command` raises -- arrives through `on_exit`, because the caller has
+--- already attached a spinner by the time this runs and an exception here
+--- would strand it with no id to cancel.
 --- @param provider gerty.ResolvedProvider
 --- @param prompt gerty.Prompt
 --- @param opts gerty.SendOpts
@@ -271,8 +279,12 @@ function M.send(provider, prompt, opts)
     return send_openai(provider, prompt, opts)
   end
 
-  local cmd =
-    vim.deepcopy(provider.build_command(provider, { read_only = opts.read_only }))
+  local built, cmd =
+    pcall(provider.build_command, provider, { read_only = opts.read_only })
+  if not built then
+    return jobs.fail(tostring(cmd), opts.on_exit)
+  end
+  cmd = vim.deepcopy(cmd)
   table.insert(cmd, M.render_cli(prompt))
 
   return jobs.spawn(cmd, {

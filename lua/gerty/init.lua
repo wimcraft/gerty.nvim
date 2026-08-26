@@ -462,6 +462,12 @@ end
 --- @param model string|nil overrides the provider's model for this call only
 --- @param provider_name string|nil overrides the default provider for this call
 local function do_replace(buf, s, e, instruction, model, provider_name)
+  -- the handle was captured before the prompt opened; the buffer can be gone
+  -- by the time it is submitted
+  if not vim.api.nvim_buf_is_valid(buf) then
+    vim.notify("gerty: buffer is gone, nothing to replace", vim.log.levels.WARN)
+    return
+  end
   local alias, rest = split_alias(instruction)
   instruction = rest
   local provider = pick_provider("replace", alias or provider_name)
@@ -517,6 +523,19 @@ local function do_replace(buf, s, e, instruction, model, provider_name)
         lines = vim.split(strip_code_fence(result.output), "\n", { plain = true })
       end
 
+      -- Read the tracking marks and drop them, whatever happens next -- an
+      -- abandoned replace used to leave two invisible extmarks behind.
+      local start_pos, end_pos
+      local buf_ok = vim.api.nvim_buf_is_valid(buf)
+      if buf_ok then
+        start_pos =
+          vim.api.nvim_buf_get_extmark_by_id(buf, marks_ns, start_mark, {})
+        end_pos =
+          vim.api.nvim_buf_get_extmark_by_id(buf, marks_ns, end_mark, {})
+        pcall(vim.api.nvim_buf_del_extmark, buf, marks_ns, start_mark)
+        pcall(vim.api.nvim_buf_del_extmark, buf, marks_ns, end_mark)
+      end
+
       if result.status == "cancelled" then
         return
       end
@@ -527,7 +546,7 @@ local function do_replace(buf, s, e, instruction, model, provider_name)
 
       -- "keep editing while it runs" includes closing the file you started
       -- from; there is nowhere to put the answer, so say so and stop
-      if not vim.api.nvim_buf_is_valid(buf) then
+      if not buf_ok then
         vim.notify(
           "gerty: buffer was closed while the request was running, discarding replace",
           vim.log.levels.WARN
@@ -535,14 +554,22 @@ local function do_replace(buf, s, e, instruction, model, provider_name)
         return
       end
 
-      local start_pos =
-        vim.api.nvim_buf_get_extmark_by_id(buf, marks_ns, start_mark, {})
-      local end_pos =
-        vim.api.nvim_buf_get_extmark_by_id(buf, marks_ns, end_mark, {})
-      pcall(vim.api.nvim_buf_del_extmark, buf, marks_ns, start_mark)
-      pcall(vim.api.nvim_buf_del_extmark, buf, marks_ns, end_mark)
+      if not lines or #lines == 0 then
+        vim.notify("gerty: empty or unreadable response", vim.log.levels.WARN)
+        return
+      end
 
-      if #start_pos == 0 or #end_pos == 0 then
+      -- Position alone is NOT enough to decide it is still safe to write.
+      -- Deleting the selected lines does not remove these marks -- Neovim
+      -- relocates them to the deletion boundary -- so a "did the mark survive"
+      -- check passes and the replacement lands on whatever moved up into that
+      -- position, destroying it. Verified: deleting the selection mid-request
+      -- replaced the line BELOW it.
+      --
+      -- So compare the text instead. The marks still do the useful work of
+      -- following edits made ABOVE the selection; this confirms the range they
+      -- now point at is the range we actually sent.
+      if #start_pos == 0 or #end_pos == 0 or end_pos[1] < start_pos[1] then
         vim.notify(
           "gerty: selection was destroyed while the request was running, aborting replace",
           vim.log.levels.WARN
@@ -550,8 +577,16 @@ local function do_replace(buf, s, e, instruction, model, provider_name)
         return
       end
 
-      if not lines or #lines == 0 then
-        vim.notify("gerty: empty or unreadable response", vim.log.levels.WARN)
+      local current = table.concat(
+        vim.api.nvim_buf_get_lines(buf, start_pos[1], end_pos[1] + 1, false),
+        "\n"
+      )
+      if current ~= selected then
+        vim.notify(
+          "gerty: the selected lines changed while the request was running, "
+            .. "aborting replace",
+          vim.log.levels.WARN
+        )
         return
       end
 
@@ -582,6 +617,10 @@ end
 --- @param model string|nil overrides the provider's model for this call only
 --- @param provider_name string|nil overrides the default provider for this call
 local function do_explain(buf, s, e, instruction, model, provider_name)
+  if not vim.api.nvim_buf_is_valid(buf) then
+    vim.notify("gerty: buffer is gone, nothing to explain", vim.log.levels.WARN)
+    return
+  end
   local alias, rest = split_alias(instruction)
   instruction = rest
   local provider = pick_provider("explain", alias or provider_name)

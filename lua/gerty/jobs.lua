@@ -100,6 +100,25 @@ function M.spawn(cmd, opts)
   return id
 end
 
+--- A job that never started. Command construction can fail before there is
+--- anything to spawn (a custom `build_command` that throws), and the caller
+--- has already put a spinner up by then -- so that has to arrive as a normal
+--- failed completion rather than as an exception, or the UI it attached is
+--- stranded with no id to cancel.
+--- @param message string
+--- @param on_exit fun(result: gerty.JobResult)|nil
+--- @return number id
+function M.fail(message, on_exit)
+  next_id = next_id + 1
+  local id = next_id
+  vim.schedule(function()
+    if on_exit then
+      on_exit({ status = "error", output = "", error = message })
+    end
+  end)
+  return id
+end
+
 --- Resolves the job as "cancelled" right now, then SIGTERMs the process. The
 --- eventual real exit hits the `done` guard and is dropped.
 --- @param id number
