@@ -19,6 +19,11 @@ local translated_ns = vim.api.nvim_create_namespace("gerty.translated")
 
 local M = {}
 
+--- Semantic version, so a bug report can say which gerty it came from:
+--- `:lua print(require("gerty").version)`. Bump it in the same commit as the
+--- git tag, or the two drift and the field becomes worse than useless.
+M.version = "0.0.1"
+
 --- @type gerty.Config|nil
 local cfg
 --- @type table<string, string>

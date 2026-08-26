@@ -13,6 +13,20 @@ This is a deliberately stripped-down alternative to
 status), a fraction of the surface area — see "What's intentionally not here"
 below for what was cut.
 
+> **Status: 0.0.1 — work in progress.**
+>
+> This works and is used daily, but it is early. The config shape, the option
+> names and the public API are all still moving, and **releases may break
+> them without a deprecation period**. If that matters to you, pin a tag
+> rather than tracking `main`:
+>
+> ```lua
+> { "rfist/gerty.nvim", tag = "v0.0.1" }
+> ```
+>
+> Breaking changes will be called out in the release notes. `require("gerty").version`
+> reports what you have installed.
+
 ## How it works
 
 - `replace` (visual mode): select code, describe the change, and only that

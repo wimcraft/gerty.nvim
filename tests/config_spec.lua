@@ -146,3 +146,12 @@ T.test("a type table without build_command is rejected", function()
     config.resolve({ providers = { mine = { type = { name = "mine" } } } })
   end, "build_command")
 end)
+
+T.test("the module reports a semantic version", function()
+  local version = require("gerty").version
+  T.ok(type(version) == "string", "version must be a string")
+  T.ok(
+    version:match("^%d+%.%d+%.%d+$") ~= nil,
+    "expected MAJOR.MINOR.PATCH, got " .. tostring(version)
+  )
+end)
