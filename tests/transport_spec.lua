@@ -40,7 +40,10 @@ T.test("a translate request is constrained to a translation field", function()
   transport.send(lm, a_translate(), noop)
   local schema = schema_of(mock)
   T.ok(schema.properties.translation, "field is `translation`")
-  T.eq(schema.properties.translation.pattern, "^ ", "prose sentinel")
+  -- no `pattern` constraint: forcing a leading space derailed generation on
+  -- real input (empty answers and junk prefixes) without protecting quotes,
+  -- which the closing instruction in prompt.lua does instead
+  T.eq(schema.properties.translation.pattern, nil, "no decoding sentinel")
   T.eq(schema.required[1], "translation")
   T.eq(schema.additionalProperties, false)
   T.eq(body_of(mock).response_format.json_schema.strict, true)
@@ -79,11 +82,7 @@ T.test("a code answer gets no prose sentinel", function()
   }), noop)
   local schema = schema_of(mock)
   T.ok(schema.properties.replacement, "field is `replacement`")
-  T.eq(
-    schema.properties.replacement.pattern,
-    nil,
-    "the sentinel's trim would eat the first line's indentation"
-  )
+  T.eq(schema.properties.replacement.pattern, nil, "no decoding sentinel")
   T.unmock_jobs(mock)
 end)
 
@@ -138,7 +137,7 @@ T.test("a per-call model does not mutate the shared provider", function()
   T.unmock_jobs(mock)
 end)
 
-T.test("prose decoding drops the sentinel and keeps the quotes", function()
+T.test("prose decoding trims and keeps the quotes", function()
   local answer = '"That is my cup!" The waiter put down the tray and left.'
   local result = transport.decode_openai(
     T.chat_response(vim.json.encode({ translation = " " .. answer })),
@@ -147,6 +146,26 @@ T.test("prose decoding drops the sentinel and keeps the quotes", function()
   )
   T.eq(result.status, "ok")
   T.eq(result.output, answer)
+end)
+
+T.test("control characters are stripped from an answer", function()
+  -- a model constrained into an odd token path can emit one; rendered raw in
+  -- a float it shows up as garbage like `^Z`
+  local result = transport.decode_openai(
+    T.chat_response(vim.json.encode({ translation = "Georg nods.\26 He waits." })),
+    lm,
+    { response_field = "translation" }
+  )
+  T.eq(result.output, "Georg nods. He waits.")
+end)
+
+T.test("newlines and tabs survive", function()
+  local result = transport.decode_openai(
+    T.chat_response(vim.json.encode({ replacement = "\tlocal x = 1\n\treturn x" })),
+    lm,
+    { response_field = "replacement", response_prose = false }
+  )
+  T.eq(result.output, "\tlocal x = 1\n\treturn x")
 end)
 
 T.test("code decoding preserves the first line's indentation", function()

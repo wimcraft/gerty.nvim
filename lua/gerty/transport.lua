@@ -39,8 +39,8 @@ end
 --- server compiles it into a decoding grammar, a CLI ignores it entirely.
 ---
 --- `response_prose` says whether the answer is prose (default) or code. It
---- controls the leading-space sentinel and how the answer is trimmed -- see
---- `json_schema()` and `decode_openai()` below.
+--- controls how the answer is trimmed: prose is trimmed on both ends, code
+--- keeps the leading whitespace that is its indentation.
 ---
 --- @class gerty.Prompt
 --- @field system string|nil instructions about the task, not the input
@@ -92,59 +92,45 @@ function M.render_messages(prompt)
   return messages
 end
 
---- Constrained decoding, and the single most load-bearing thing in this file.
----
---- The server compiles this schema into a decoding grammar, which is what
+--- Constrained decoding: the schema becomes a decoding grammar, which is what
 --- stops a reasoning-tuned local model prefacing its answer with a plan ("The
---- user wants me to...") and burying the real answer at the end. Prompt
---- wording and thinking toggles are suggestions the model can and does
---- ignore; a grammar is not. It is a **latency** feature as much as a
---- correctness one -- tokens spent narrating are tokens not spent answering,
---- and a translation that took ~15s answers in ~1.5s once it cannot narrate.
+--- user wants me to...") and burying the real answer at the end. Prompt wording
+--- and thinking toggles are suggestions a model can and does ignore; a grammar
+--- is not. It is a latency feature as much as a correctness one -- tokens spent
+--- narrating are tokens not spent answering.
 ---
---- `pattern = "^ "` is not cosmetic, and it is what makes the schema usable
---- for prose at all. Without it, output that BEGINS with a quotation mark
---- (all novel dialogue) is silently truncated: the model reuses the grammar's
---- own string-opening `"` as the dialogue's opening quote, and the dialogue's
---- closing quote then ends the string. Valid JSON, `finish_reason: "stop"`,
---- everything after the first line of dialogue gone -- 0/15, and unfixable by
---- instruction, because the model never *chose* to emit that quote. Quotes
---- mid-string are escaped correctly; the collision only ever happens at
---- position 0.
+--- HISTORY, because this used to say the opposite. The schema carried
+--- `pattern = "^ "`, forcing the answer to begin with a space. That existed to
+--- stop a delimiter collision at position 0, where a model reusing the
+--- grammar's own string-opening quote as the text's opening quote had its
+--- answer truncated at the text's closing quote. It was measured as load-
+--- bearing at the time: multi-quote input scored 6/6 with it and 0/6 without.
 ---
---- Forcing ANY non-quote character into position 0 defuses it, but almost
---- everything gets interpreted: `"> "` closed an imaginary `</grammar_notes>`
---- tag; `"~ "`/`"@ "` made the model describe the marker; `"- "` broke
---- translate 0/4; `"= "` leaked LaTeX `\text{}`; `"EN: "` silently dropped the
---- dialogue quotes; `"Oh, "`/`"Well, "` were absorbed grammatically and
---- rewrote the line; `"¡"` switched the output language to Spanish; `"* "` is
---- a regex metacharacter and fails to compile. A single space is the one
---- genuinely inert choice -- not markup, not maths, not a word that can be
---- absorbed into the sentence after it, not a metacharacter -- and
---- `decode_openai` removes it again.
+--- It has been REMOVED, on a later measurement that reversed the result. A
+--- standalone leading space is off-distribution for a tokenizer that normally
+--- merges the space into the following word, and constraining generation into
+--- that rare token path derails it. On a real reported failure -- a line of
+--- dialogue with an unbalanced opening quote -- the sentinel produced an EMPTY
+--- translation 2 times in 6, and prefixed the rest with junk ("(") 4 times in
+--- 6. Without it: 0 empty, 0 junk, 6/6 complete.
 ---
---- Re-examined and KEPT after the closing-instruction fix in prompt.lua made
---- it unnecessary for *completeness*, because it is still what preserves
---- dialogue quotes: multi-quote input scored 6/6 with it and **0/6** without,
---- where the model dodged the same delimiter collision by silently dropping
---- the quotation marks instead of truncating. Same conflict, quieter symptom.
+--- Crucially, quote preservation did NOT regress: quote-initial dialogue and a
+--- multi-quote exchange both scored 6/6 with and without. What protects quotes
+--- now is the closing instruction in prompt.lua, added after the sentinel was
+--- and independently verified there. The sentinel had become a cost with no
+--- remaining benefit.
 ---
---- Code answers (`response_prose = false`) get the schema WITHOUT the
---- sentinel: significant leading whitespace is the whole point of a code
---- replacement, and the trim that removes the sentinel would remove the first
---- line's indentation with it.
+--- The lesson worth keeping: a guard justified by measurement has to be
+--- re-measured when the thing it guards against is fixed another way, or it
+--- outlives its reason and starts causing the failure it was meant to prevent.
 ---
 --- @param field string
 --- @param prose boolean
 --- @return table
-local function json_schema(field, prose)
-  local property = { type = "string" }
-  if prose then
-    property.pattern = "^ "
-  end
+local function json_schema(field)
   return {
     type = "object",
-    properties = { [field] = property },
+    properties = { [field] = { type = "string" } },
     required = { field },
     additionalProperties = false,
   }
@@ -218,8 +204,12 @@ function M.decode_openai(raw, provider, prompt)
     end
   end
 
+  -- Control characters are never part of an answer, and a model constrained
+  -- into an odd token path can emit one; rendered raw in a float it shows up
+  -- as garbage like `^Z`. Tabs and newlines are legitimate, the rest are not.
+  content = content:gsub("[%z\1-\8\11\12\14-\31\127]", "")
+
   if is_prose(prompt) then
-    -- also removes the leading-space sentinel from json_schema()
     content = vim.trim(content)
   else
     -- code: blank lines and trailing whitespace go, the first line's
@@ -256,7 +246,7 @@ local function send_openai(provider, prompt, opts)
       json_schema = {
         name = "gerty",
         strict = true,
-        schema = json_schema(prompt.response_field, is_prose(prompt)),
+        schema = json_schema(prompt.response_field),
       },
     }
   end

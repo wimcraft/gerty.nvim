@@ -67,30 +67,39 @@ SHALL forbid additional properties.
 - **WHEN** an operation with a response field runs on a CLI provider
 - **THEN** no schema is applied and the prompt is passed through as text
 
-### Requirement: Prose Delimiter Guard
+### Requirement: No Decoding Sentinel
 
-The system SHALL require prose answers to begin with a single leading space,
-via a `pattern` constraint in the schema, and SHALL remove that space when
-decoding. This prevents a delimiter collision at position 0, where the model
-reuses the grammar's own string-opening quotation mark as the text's opening
-quote and the text's closing quote then terminates the string.
+The system SHALL NOT constrain the first character of an answer. A schema
+`pattern` forcing a leading space was previously used to avoid a delimiter
+collision at position 0; it has been removed because it derails generation
+without providing the protection it was kept for.
 
-#### Scenario: Dialogue keeps its quotation marks
+#### Scenario: A sentinel derails generation
 
-- **WHEN** a translation begins with a quotation mark, as novel dialogue does
-- **THEN** the leading space occupies position 0 and the quotation marks survive into the answer
+- **WHEN** the answer is constrained to begin with a standalone space
+- **THEN** generation is pushed into a token path that is off-distribution for a tokenizer that merges the space into the following word
+- **AND** on real input this produced empty answers and answers prefixed with junk
 
-#### Scenario: Without the guard
+#### Scenario: Quote protection comes from the prompt
 
-- **WHEN** the guard is absent
-- **THEN** the answer is either silently truncated after the first line of dialogue, or has its quotation marks silently dropped
-- **AND** neither is fixable by instruction, because the model never chose to emit the colliding quote
+- **WHEN** a translation of quote-initial or multi-quote dialogue is requested
+- **THEN** the quotation marks are preserved by the closing instruction the prompt appends, not by any constraint on the first character
 
-#### Scenario: The sentinel must be inert
+#### Scenario: A guard is re-measured, not inherited
 
-- **WHEN** a non-space marker is used to occupy position 0
-- **THEN** the model interprets it — closing imaginary tags, describing the marker, switching output language, or failing to compile as a regex
-- **AND** a single space is used because it is not markup, not maths, not a word that can be absorbed into the sentence, and not a regex metacharacter
+- **WHEN** a measured guard exists and the failure it guards against is later fixed another way
+- **THEN** the guard SHALL be re-measured rather than kept on the strength of the original result
+- **AND** a guard that has outlived its reason can begin causing the failure it was added to prevent
+
+### Requirement: Control Characters Are Removed
+
+The system SHALL strip control characters from a decoded answer, preserving
+tabs and newlines.
+
+#### Scenario: A stray control character
+
+- **WHEN** a model emits a control character in its answer
+- **THEN** it is removed rather than rendered, because displayed raw it appears as garbage such as `^Z`
 
 ### Requirement: Code Answers Are Not Treated As Prose
 
