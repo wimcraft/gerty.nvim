@@ -416,7 +416,7 @@ was caught.
 make test        # or: nvim -l tests/run.lua
 ```
 
-62 tests, a few seconds, no dependencies — the suite needs nothing the plugin
+66 tests, a few seconds, no dependencies — the suite needs nothing the plugin
 doesn't already need. Subprocesses are mocked, so nothing is spawned and no
 model is called.
 

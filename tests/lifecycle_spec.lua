@@ -59,7 +59,7 @@ T.test("wiping the buffer mid-replace reports it and cleans up the temp file", f
 
   local joined = table.concat(messages, " ")
   T.ok(
-    joined:find("buffer was closed", 1, true),
+    joined:find("the buffer was closed", 1, true),
     "expected a notification, got: " .. joined
   )
   T.unmock_jobs(mock)
@@ -99,7 +99,7 @@ end)
 --- @param during fun(buf: number)
 --- @return string[] lines afterwards
 --- @return string[] notifications
-local function replace_interrupted_by(lines, during)
+local function replace_interrupted_by_at(lines, first, last, during)
   gerty.setup({ providers = { lm = { type = "lmstudio", models = { "m" } } } })
   local mock = T.mock_jobs()
   mock.delay = 100
@@ -107,7 +107,7 @@ local function replace_interrupted_by(lines, during)
     status = "ok",
     output = T.chat_response(vim.json.encode({ replacement = "NEW" })),
   }
-  local buf = T.buffer_with_selection(lines, 2, 3)
+  local buf = T.buffer_with_selection(lines, first, last)
   local messages = T.capture_notify(function()
     gerty.replace({ instruction = "x" })
     during(buf)
@@ -115,6 +115,12 @@ local function replace_interrupted_by(lines, during)
   end)
   T.unmock_jobs(mock)
   return vim.api.nvim_buf_get_lines(buf, 0, -1, false), messages
+end
+
+--- @param lines string[]
+--- @param during fun(buf: number)
+local function replace_interrupted_by(lines, during)
+  return replace_interrupted_by_at(lines, 2, 3, during)
 end
 
 T.test("deleting the selection mid-request does not destroy the line below", function()
@@ -222,8 +228,108 @@ T.test("a buffer wiped while the prompt is open is caught", function()
 
   T.eq(mock.calls, 0, "nothing may be sent for a buffer that is gone")
   T.ok(
-    table.concat(messages, " "):find("buffer is gone", 1, true),
+    table.concat(messages, " "):find("the buffer was closed", 1, true),
     "expected a notification, got: " .. table.concat(messages, " ")
   )
   T.unmock_jobs(mock)
+end)
+
+--- Findings from the second audit pass. Each was a real reproduced defect that
+--- the first round of fixes did NOT cover.
+
+T.test("a deleted selection whose text repeats below is still not overwritten", function()
+  -- the case no positional check can see: the line that moves up is IDENTICAL
+  -- to the one deleted, so a text comparison alone also passes. Only Neovim's
+  -- own `invalidate` flag distinguishes them.
+  local out = replace_interrupted_by_at(
+    { "above", "same", "same", "below" }, 2, 2,
+    function(buf)
+      vim.api.nvim_buf_set_lines(buf, 1, 2, false, {})
+    end
+  )
+  T.eq(table.concat(out, "|"), "above|same|below", "the surviving duplicate was overwritten")
+end)
+
+T.test("the range is tracked from selection time, not from prompt submission", function()
+  gerty.setup({ providers = { lm = { type = "lmstudio", models = { "m" } } } })
+  local mock = T.mock_jobs()
+  mock.delay = 20
+  mock.reply = {
+    status = "ok",
+    output = T.chat_response(vim.json.encode({ replacement = "NEW" })),
+  }
+  local buf = T.buffer_with_selection({ "target", "below" }, 1, 1)
+
+  local submit
+  local original = vim.ui.input
+  vim.ui.input = function(_, on_confirm) submit = on_confirm end
+  gerty.replace()
+  vim.ui.input = original
+
+  -- everything shifts down while the user is still typing
+  vim.api.nvim_buf_set_lines(buf, 0, 0, false, { "inserted" })
+  T.capture_notify(function()
+    submit("x")
+    T.wait_for(function() return false end, 300)
+  end)
+
+  T.eq(
+    table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "|"),
+    "inserted|NEW|below",
+    "the replacement must follow the selection, not sit on its old row"
+  )
+  T.unmock_jobs(mock)
+end)
+
+T.test("an unloaded but still valid buffer is handled", function()
+  gerty.setup({ providers = { lm = { type = "lmstudio", models = { "m" } } } })
+  local mock = T.mock_jobs()
+  local buf = T.buffer_with_selection({ "a", "b", "c" }, 1, 2)
+  local submit
+  local original = vim.ui.input
+  vim.ui.input = function(_, on_confirm) submit = on_confirm end
+  gerty.replace()
+  vim.ui.input = original
+
+  vim.cmd("enew")
+  vim.cmd("bunload! " .. buf)
+  T.ok(vim.api.nvim_buf_is_valid(buf), "still valid")
+  T.ok(not vim.api.nvim_buf_is_loaded(buf), "but not loaded")
+
+  local messages = T.capture_notify(function()
+    submit("x")
+    T.wait_for(function() return false end, 200)
+  end)
+  T.eq(mock.calls, 0, "nothing may be sent for a buffer with no lines to read")
+  T.ok(#messages > 0, "the user is told why")
+  T.unmock_jobs(mock)
+end)
+
+T.test("a build_command returning a non-command is reported, not thrown", function()
+  gerty.setup({
+    providers = {
+      bad = {
+        type = {
+          name = "bad",
+          transport = "cli",
+          capabilities = { agentic = true },
+          build_command = function() return nil end,
+        },
+        models = { "m" },
+      },
+    },
+  })
+  local buf = T.buffer_with_selection({ "a", "b", "c" }, 2, 3)
+  local messages = T.capture_notify(function()
+    gerty.replace({ instruction = "x" })
+    T.wait_for(function() return false end, 300)
+  end)
+  local status_ns = vim.api.nvim_get_namespaces()["gerty.status"]
+  local marks_ns = vim.api.nvim_get_namespaces()["gerty.marks"]
+  T.eq(#vim.api.nvim_buf_get_extmarks(buf, status_ns, 0, -1, {}), 0, "spinner stranded")
+  T.eq(#vim.api.nvim_buf_get_extmarks(buf, marks_ns, 0, -1, {}), 0, "tracking mark leaked")
+  T.ok(
+    table.concat(messages, " "):find("expected a non-empty list", 1, true),
+    "expected an explanatory error, got: " .. table.concat(messages, " ")
+  )
 end)

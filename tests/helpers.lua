@@ -12,7 +12,11 @@ local current = "?"
 --- @param fn fun()
 function T.test(name, fn)
   current = name
+  -- a test that fails mid-way must not leave jobs.spawn mocked, or every test
+  -- after it silently runs against the previous test's fake
+  local pristine = require("gerty.jobs").spawn
   local ok, err = pcall(fn)
+  require("gerty.jobs").spawn = pristine
   if ok then
     T.passed = T.passed + 1
     io.write("  ok   " .. name .. "\n")

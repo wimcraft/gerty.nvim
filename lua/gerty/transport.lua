@@ -9,6 +9,30 @@
 
 local jobs = require("gerty.jobs")
 
+--- Builds a provider's command without trusting it. A custom `build_command`
+--- is user code: it can throw, and it can return something that is not a
+--- command at all. Either way the caller has a spinner up already, so this has
+--- to come back as a value rather than as an exception.
+--- @param provider gerty.ResolvedProvider
+--- @param opts gerty.CommandOpts
+--- @return string[]|nil cmd
+--- @return string|nil error
+local function build(provider, opts)
+  local ok, cmd = pcall(provider.build_command, provider, opts)
+  if not ok then
+    return nil, tostring(cmd)
+  end
+  if type(cmd) ~= "table" or #cmd == 0 or type(cmd[1]) ~= "string" then
+    return nil,
+      string.format(
+        "provider '%s' build_command returned %s, expected a non-empty list of strings",
+        tostring(provider.alias or provider.name),
+        type(cmd) == "table" and "an empty or malformed list" or type(cmd)
+      )
+  end
+  return cmd, nil
+end
+
 --- `response_field` names the JSON key the answer should arrive in. It is set
 --- by the op that built the prompt (see prompt.lua for why the NAME does half
 --- the work), and it is honoured only where it can be: an OpenAI-compatible
@@ -223,10 +247,9 @@ local function send_openai(provider, prompt, opts)
   payload.chat_template_kwargs = provider.chat_template_kwargs
   local body = vim.json.encode(payload)
 
-  local built, cmd =
-    pcall(provider.build_command, provider, { read_only = opts.read_only })
-  if not built then
-    return jobs.fail(tostring(cmd), opts.on_exit)
+  local cmd, build_error = build(provider, { read_only = opts.read_only })
+  if not cmd then
+    return jobs.fail(build_error, opts.on_exit)
   end
 
   return jobs.spawn(cmd, {
@@ -279,10 +302,9 @@ function M.send(provider, prompt, opts)
     return send_openai(provider, prompt, opts)
   end
 
-  local built, cmd =
-    pcall(provider.build_command, provider, { read_only = opts.read_only })
-  if not built then
-    return jobs.fail(tostring(cmd), opts.on_exit)
+  local cmd, build_error = build(provider, { read_only = opts.read_only })
+  if not cmd then
+    return jobs.fail(build_error, opts.on_exit)
   end
   cmd = vim.deepcopy(cmd)
   table.insert(cmd, M.render_cli(prompt))

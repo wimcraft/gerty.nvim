@@ -128,8 +128,20 @@ be abandoned.
 #### Scenario: Position alone is insufficient
 
 - **WHEN** the selected lines are deleted while the request is in flight
-- **THEN** the tracking marks do not disappear — they relocate to the deletion boundary — so the system SHALL also verify that the text at the tracked range is still the text that was sent
-- **AND** without that check the replacement lands on whatever moved into that position and destroys it
+- **THEN** the tracking mark does not disappear — a point mark relocates to the deletion boundary — so the system SHALL mark the tracked range invalid on deletion and refuse to write
+- **AND** without that the replacement lands on whatever moved into that position and destroys it
+
+#### Scenario: Neither guard is sufficient alone
+
+- **WHEN** a deleted selection is followed by a line holding identical text
+- **THEN** comparing text cannot detect the deletion, and only the range's invalidation can
+- **AND** when the range is edited rather than deleted, invalidation may not fire and only the text comparison can detect it
+- **AND** the system SHALL therefore apply both
+
+#### Scenario: The range is tracked from selection time
+
+- **WHEN** the buffer is edited while the instruction prompt is still open
+- **THEN** the replacement still lands on the originally selected lines, because tracking begins when the selection is taken rather than when the prompt is submitted
 
 #### Scenario: The selection is edited rather than deleted
 

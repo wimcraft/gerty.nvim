@@ -285,6 +285,95 @@ local function visual_line_range()
   return s, e
 end
 
+--- A selected line range that survives the user editing around it.
+---
+--- Created the moment the selection is taken -- BEFORE the prompt opens, not
+--- when it is submitted -- because everything can move while someone types
+--- their instruction, and line numbers captured beforehand are stale by then.
+---
+--- Two independent guards, because neither is sufficient alone:
+---
+---  * `invalidate = true` makes Neovim mark the extmark invalid when the range
+---    it covers is deleted outright. A plain point extmark does NOT disappear
+---    on deletion -- it RELOCATES to the deletion boundary -- so a "did the
+---    mark survive" check silently passes and the replacement lands on
+---    whatever moved up into that position.
+---  * the text comparison catches what invalidation does not: a range edited
+---    rather than deleted, and -- the case no positional check can ever see --
+---    a deletion where the line that moves up is identical to the one that
+---    went away.
+---
+--- @class gerty.Range
+--- @field buf number
+--- @field mark number
+--- @field text string what the range held when it was captured
+
+--- @param buf number
+--- @param s number 1-indexed inclusive
+--- @param e number 1-indexed inclusive
+--- @return gerty.Range|nil nil when the buffer cannot be read
+local function track_range(buf, s, e)
+  if not vim.api.nvim_buf_is_valid(buf) or not vim.api.nvim_buf_is_loaded(buf) then
+    return nil
+  end
+  local lines = vim.api.nvim_buf_get_lines(buf, s - 1, e, false)
+  if #lines == 0 then
+    return nil
+  end
+  return {
+    buf = buf,
+    text = table.concat(lines, "\n"),
+    mark = vim.api.nvim_buf_set_extmark(buf, marks_ns, s - 1, 0, {
+      end_row = e - 1,
+      end_col = #lines[#lines],
+      invalidate = true,
+    }),
+  }
+end
+
+--- Where the range is NOW, if it is still the range that was captured.
+--- @param range gerty.Range
+--- @return number|nil start_row 0-indexed
+--- @return number|string end_row 0-indexed, or the reason when start_row is nil
+local function resolve_range(range)
+  if
+    not vim.api.nvim_buf_is_valid(range.buf)
+    or not vim.api.nvim_buf_is_loaded(range.buf)
+  then
+    return nil, "the buffer was closed"
+  end
+  local pos = vim.api.nvim_buf_get_extmark_by_id(
+    range.buf,
+    marks_ns,
+    range.mark,
+    { details = true }
+  )
+  local details = pos[3]
+  if #pos == 0 or (details and details.invalid) then
+    return nil, "the selection was deleted"
+  end
+  local start_row = pos[1]
+  local end_row = (details and details.end_row) or start_row
+  if end_row < start_row then
+    return nil, "the selection was deleted"
+  end
+  local current = table.concat(
+    vim.api.nvim_buf_get_lines(range.buf, start_row, end_row + 1, false),
+    "\n"
+  )
+  if current ~= range.text then
+    return nil, "the selected lines changed"
+  end
+  return start_row, end_row
+end
+
+--- @param range gerty.Range|nil
+local function release_range(range)
+  if range and vim.api.nvim_buf_is_valid(range.buf) then
+    pcall(vim.api.nvim_buf_del_extmark, range.buf, marks_ns, range.mark)
+  end
+end
+
 --- @param buf number
 --- @param s number 1-indexed
 --- @param e number 1-indexed
@@ -461,24 +550,32 @@ end
 --- @param instruction string
 --- @param model string|nil overrides the provider's model for this call only
 --- @param provider_name string|nil overrides the default provider for this call
-local function do_replace(buf, s, e, instruction, model, provider_name)
-  -- the handle was captured before the prompt opened; the buffer can be gone
-  -- by the time it is submitted
-  if not vim.api.nvim_buf_is_valid(buf) then
-    vim.notify("gerty: buffer is gone, nothing to replace", vim.log.levels.WARN)
+local function do_replace(range, instruction, model, provider_name)
+  -- the range was captured before the prompt opened; everything can have moved
+  -- or vanished by the time it is submitted
+  local start_row, end_row = resolve_range(range)
+  if not start_row then
+    release_range(range)
+    vim.notify(
+      "gerty: " .. tostring(end_row) .. ", nothing to replace",
+      vim.log.levels.WARN
+    )
     return
   end
+  local buf, s, e = range.buf, start_row + 1, end_row + 1
+
   local alias, rest = split_alias(instruction)
   instruction = rest
-  local provider = pick_provider("replace", alias or provider_name)
+  local ok_provider, provider =
+    pcall(pick_provider, "replace", alias or provider_name)
+  if not ok_provider then
+    release_range(range)
+    error(provider, 0)
+  end
   local agentic = transport.is_agentic(provider)
-  local selected =
-    table.concat(vim.api.nvim_buf_get_lines(buf, s - 1, e, false), "\n")
+  local selected = range.text
   local skill_names, skill_contents = skills.resolve(instruction, skill_map)
   local tmp_file = agentic and vim.fn.tempname() or nil
-
-  local start_mark = vim.api.nvim_buf_set_extmark(buf, marks_ns, s - 1, 0, {})
-  local end_mark = vim.api.nvim_buf_set_extmark(buf, marks_ns, e - 1, 0, {})
 
   local request = prompt.replace({
     instruction = instruction,
@@ -523,18 +620,10 @@ local function do_replace(buf, s, e, instruction, model, provider_name)
         lines = vim.split(strip_code_fence(result.output), "\n", { plain = true })
       end
 
-      -- Read the tracking marks and drop them, whatever happens next -- an
-      -- abandoned replace used to leave two invisible extmarks behind.
-      local start_pos, end_pos
-      local buf_ok = vim.api.nvim_buf_is_valid(buf)
-      if buf_ok then
-        start_pos =
-          vim.api.nvim_buf_get_extmark_by_id(buf, marks_ns, start_mark, {})
-        end_pos =
-          vim.api.nvim_buf_get_extmark_by_id(buf, marks_ns, end_mark, {})
-        pcall(vim.api.nvim_buf_del_extmark, buf, marks_ns, start_mark)
-        pcall(vim.api.nvim_buf_del_extmark, buf, marks_ns, end_mark)
-      end
+      -- Resolve before releasing, and release on every outcome -- an
+      -- abandoned replace used to leave its tracking extmark behind.
+      local write_start, write_end = resolve_range(range)
+      release_range(range)
 
       if result.status == "cancelled" then
         return
@@ -543,12 +632,13 @@ local function do_replace(buf, s, e, instruction, model, provider_name)
         vim.notify("gerty: " .. result.error, vim.log.levels.ERROR)
         return
       end
-
-      -- "keep editing while it runs" includes closing the file you started
-      -- from; there is nowhere to put the answer, so say so and stop
-      if not buf_ok then
+      -- "keep editing while it runs" includes deleting or rewriting the very
+      -- lines being worked on. There is then nowhere the answer can safely go,
+      -- and that is a better explanation than whatever the answer looked like.
+      if not write_start then
         vim.notify(
-          "gerty: buffer was closed while the request was running, discarding replace",
+          "gerty: " .. tostring(write_end) .. " while the request was running, "
+            .. "aborting replace",
           vim.log.levels.WARN
         )
         return
@@ -559,44 +649,7 @@ local function do_replace(buf, s, e, instruction, model, provider_name)
         return
       end
 
-      -- Position alone is NOT enough to decide it is still safe to write.
-      -- Deleting the selected lines does not remove these marks -- Neovim
-      -- relocates them to the deletion boundary -- so a "did the mark survive"
-      -- check passes and the replacement lands on whatever moved up into that
-      -- position, destroying it. Verified: deleting the selection mid-request
-      -- replaced the line BELOW it.
-      --
-      -- So compare the text instead. The marks still do the useful work of
-      -- following edits made ABOVE the selection; this confirms the range they
-      -- now point at is the range we actually sent.
-      if #start_pos == 0 or #end_pos == 0 or end_pos[1] < start_pos[1] then
-        vim.notify(
-          "gerty: selection was destroyed while the request was running, aborting replace",
-          vim.log.levels.WARN
-        )
-        return
-      end
-
-      local current = table.concat(
-        vim.api.nvim_buf_get_lines(buf, start_pos[1], end_pos[1] + 1, false),
-        "\n"
-      )
-      if current ~= selected then
-        vim.notify(
-          "gerty: the selected lines changed while the request was running, "
-            .. "aborting replace",
-          vim.log.levels.WARN
-        )
-        return
-      end
-
-      vim.api.nvim_buf_set_lines(
-        buf,
-        start_pos[1],
-        end_pos[1] + 1,
-        false,
-        lines
-      )
+      vim.api.nvim_buf_set_lines(buf, write_start, write_end + 1, false, lines)
     end,
   })
 
@@ -616,16 +669,22 @@ end
 --- @param instruction string
 --- @param model string|nil overrides the provider's model for this call only
 --- @param provider_name string|nil overrides the default provider for this call
-local function do_explain(buf, s, e, instruction, model, provider_name)
-  if not vim.api.nvim_buf_is_valid(buf) then
-    vim.notify("gerty: buffer is gone, nothing to explain", vim.log.levels.WARN)
+local function do_explain(range, instruction, model, provider_name)
+  local start_row, end_row = resolve_range(range)
+  release_range(range)
+  if not start_row then
+    vim.notify(
+      "gerty: " .. tostring(end_row) .. ", nothing to explain",
+      vim.log.levels.WARN
+    )
     return
   end
+  local buf, s, e = range.buf, start_row + 1, end_row + 1
+
   local alias, rest = split_alias(instruction)
   instruction = rest
   local provider = pick_provider("explain", alias or provider_name)
-  local selected =
-    table.concat(vim.api.nvim_buf_get_lines(buf, s - 1, e, false), "\n")
+  local selected = range.text
   local skill_names, skill_contents = skills.resolve(instruction, skill_map)
 
   local request = prompt.explain({
@@ -961,22 +1020,34 @@ local function do_gloss(sel, instruction, opts)
 end
 
 --- Replace the current visual selection with the result of an instruction.
---- Only ever writes to the selected range; never touches other files.
+--- Only ever writes to the selected range of this buffer. On a CLI provider
+--- the model is *asked* to leave every other file alone but is not prevented
+--- from touching them -- see the safety table in the README. A chat-only
+--- provider has no file tools at all.
 --- @param opts { instruction: string|nil, model: string|nil, provider: string|nil }|nil
 function M.replace(opts)
   assert(cfg, "gerty: call require('gerty').setup() first")
   opts = opts or {}
   local buf = vim.api.nvim_get_current_buf()
   local s, e = visual_line_range()
+  -- captured now, not at submit: the buffer can be edited, unloaded or wiped
+  -- while the prompt is open
+  local range = track_range(buf, s, e)
+  if not range then
+    vim.notify("gerty: nothing to replace", vim.log.levels.WARN)
+    return
+  end
 
   if opts.instruction then
-    do_replace(buf, s, e, opts.instruction, opts.model, opts.provider)
+    do_replace(range, opts.instruction, opts.model, opts.provider)
     return
   end
 
   input_with_hint("Replace: ", function(instruction)
     if instruction and vim.trim(instruction) ~= "" then
-      do_replace(buf, s, e, instruction, opts.model, opts.provider)
+      do_replace(range, instruction, opts.model, opts.provider)
+    else
+      release_range(range)
     end
   end)
 end
@@ -991,21 +1062,27 @@ function M.explain(opts)
   opts = opts or {}
   local buf = vim.api.nvim_get_current_buf()
   local s, e = visual_line_range()
+  local range = track_range(buf, s, e)
+  if not range then
+    vim.notify("gerty: nothing to explain", vim.log.levels.WARN)
+    return
+  end
 
   if opts.instruction then
-    do_explain(buf, s, e, opts.instruction, opts.model, opts.provider)
+    do_explain(range, opts.instruction, opts.model, opts.provider)
     return
   end
 
   input_with_hint("Explain: ", function(instruction)
     if instruction == nil then
+      release_range(range)
       return
     end
     if vim.trim(instruction) == "" then
       instruction = "Explain what this code does, why it exists, and how it "
         .. "is used elsewhere in the repository."
     end
-    do_explain(buf, s, e, instruction, opts.model, opts.provider)
+    do_explain(range, instruction, opts.model, opts.provider)
   end)
 end
 
