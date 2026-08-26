@@ -894,6 +894,15 @@ local function run_language_op(
       spinner:stop()
       bottom_spinner:stop()
       Spinner.undim(sel.buf, dim_id)
+
+      -- Resolve and release up front, before any early return can skip it.
+      -- The answer is still worth reading even if the text moved or went away,
+      -- so the float is shown either way; only the things that point AT the
+      -- buffer -- the signs and the history jump -- need current rows, and
+      -- they are skipped when there is no longer a range to point at.
+      local start_row, end_row = resolve_range(sel.range)
+      release_range(sel.range)
+
       if result.status == "cancelled" then
         return
       end
@@ -906,12 +915,6 @@ local function run_language_op(
         return
       end
       cache.set(cache_key, result.output)
-      -- The answer is still worth reading even if the text moved or went
-      -- away, so the float is shown either way. Only the things that point AT
-      -- the buffer -- the signs and the history jump -- need current rows, and
-      -- they are simply skipped when there is no longer a range to point at.
-      local start_row, end_row = resolve_range(sel.range)
-      release_range(sel.range)
       if start_row then
         mark_translated(sel.buf, start_row + 1, end_row + 1)
       end
@@ -942,7 +945,11 @@ local function do_translate(sel, opts)
   if not refresh_selection(sel, "translate") then
     return
   end
-  local provider = pick_provider("translate", opts.provider)
+  local found, provider = pcall(pick_provider, "translate", opts.provider)
+  if not found then
+    release_range(sel.range)
+    error(provider, 0)
+  end
   local lang = language_for(opts)
   local before, after = selection.context(sel, lang.context_lines)
   local model = opts.model or provider.model
@@ -1015,7 +1022,11 @@ local function do_gloss(sel, instruction, opts)
   end
   local alias, rest = split_alias(instruction)
   instruction = rest
-  local provider = pick_provider("gloss", alias or opts.provider)
+  local found, provider = pcall(pick_provider, "gloss", alias or opts.provider)
+  if not found then
+    release_range(sel.range)
+    error(provider, 0)
+  end
   local lang = language_for(opts)
   local before, after = selection.context(sel, lang.context_lines)
   local skill_names, skill_contents = skills.resolve(instruction, skill_map)
@@ -1207,13 +1218,19 @@ function M.gloss(opts)
     return
   end
 
-  input_with_hint("Gloss: ", function(instruction)
+  local prompted, err = pcall(input_with_hint, "Gloss: ", function(instruction)
     if instruction == nil then
       release_range(sel.range)
       return
     end
     do_gloss(sel, instruction, opts)
   end)
+  -- a prompt backend can throw before the callback ever runs; releasing twice
+  -- is harmless, leaving the mark behind is not
+  if not prompted then
+    release_range(sel.range)
+    error(err, 0)
+  end
 end
 
 --- Dictionary lookup of the word under the cursor. No model, no provider, no
@@ -1282,6 +1299,9 @@ function M.word(opts)
     on_exit = function(result)
       active[id] = nil
       spinner:stop()
+      -- computed and released before the early returns, for the same reason
+      local entry = history_entry()
+      release_range(range)
       if result.status == "cancelled" then
         return
       end
@@ -1299,8 +1319,7 @@ function M.word(opts)
       end
       float.show(title, text)
       cache.set(cache_key, text)
-      history.record(history_entry())
-      release_range(range)
+      history.record(entry)
     end,
   })
 

@@ -447,3 +447,93 @@ T.test("word() history follows the word when lines are inserted above", function
   T.eq(entry.start_row, 3, "history must jump to where the word actually is")
   T.unmock_jobs(mock)
 end)
+
+--- Fourth audit pass: tracking extmarks leaked on every unhappy path. Tested
+--- as a class rather than case by case -- a leak is a leak whichever early
+--- return caused it, and enumerating outcomes is what caught the ones the
+--- individual fixes had missed.
+
+--- @param buf number
+--- @return number
+local function tracking_marks(buf)
+  local ns = vim.api.nvim_get_namespaces()["gerty.marks"]
+  if not ns then
+    return 0
+  end
+  return #vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, {})
+end
+
+T.test("no language-op outcome leaves a tracking extmark behind", function()
+  local outcomes = {
+    cancelled = { status = "cancelled", output = "" },
+    errored = { status = "error", output = "", error = "boom" },
+    empty = {
+      status = "ok",
+      output = T.chat_response(vim.json.encode({ translation = "  " })),
+    },
+    succeeded = {
+      status = "ok",
+      output = T.chat_response(vim.json.encode({ translation = " done" })),
+    },
+  }
+  for name, reply in pairs(outcomes) do
+    language_setup()
+    local mock = T.mock_jobs()
+    mock.delay = 20
+    mock.reply = reply
+    local buf = select_lines({ "above", "eins", "zwei" }, 2, 2)
+    T.capture_notify(function()
+      gerty.translate({ refresh = true })
+      T.wait_for(function() return false end, 250)
+    end)
+    T.eq(tracking_marks(buf), 0, "translate leaked a mark when " .. name)
+    T.unmock_jobs(mock)
+  end
+end)
+
+T.test("no word() outcome leaves a tracking extmark behind", function()
+  local outcomes = {
+    cancelled = { status = "cancelled", output = "" },
+    errored = { status = "error", output = "", error = "boom" },
+    empty = { status = "ok", output = "   " },
+    succeeded = { status = "ok", output = "a definition" },
+  }
+  for name, reply in pairs(outcomes) do
+    gerty.setup({ providers = { pi = { models = { "m" } } } })
+    local mock = T.mock_jobs()
+    mock.delay = 20
+    mock.reply = reply
+    local buf = vim.api.nvim_create_buf(true, false)
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "above", "Wort", "below" })
+    vim.api.nvim_win_set_buf(0, buf)
+    vim.api.nvim_win_set_cursor(0, { 2, 0 })
+    T.capture_notify(function()
+      gerty.word({ refresh = true })
+      T.wait_for(function() return false end, 250)
+    end)
+    T.eq(tracking_marks(buf), 0, "word leaked a mark when " .. name)
+    T.unmock_jobs(mock)
+  end
+end)
+
+T.test("a failure before dispatch releases the range", function()
+  language_setup()
+  local buf = select_lines({ "above", "eins", "zwei" }, 2, 2)
+  T.raises(function()
+    gerty.translate({ provider = "missing", refresh = true })
+  end, "unknown provider")
+  T.eq(tracking_marks(buf), 0, "an unknown provider leaked a mark")
+end)
+
+T.test("a prompt backend that throws releases the range", function()
+  language_setup()
+  local buf = select_lines({ "above", "eins", "zwei" }, 2, 2)
+  local original = vim.ui.input
+  vim.ui.input = function()
+    error("input backend exploded")
+  end
+  local ok = pcall(gerty.gloss)
+  vim.ui.input = original
+  T.ok(not ok, "the error should propagate")
+  T.eq(tracking_marks(buf), 0, "a throwing prompt leaked a mark")
+end)
