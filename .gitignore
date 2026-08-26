@@ -1,0 +1,21 @@
+.luarc.json
+*.log
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+
+# Agent tooling and local workflow -- not part of the plugin.
+# Kept on disk, deliberately unpublished: these describe how the author works,
+# not how gerty works. openspec/specs/ IS published; only the CLI config here.
+CLAUDE.md
+AGENTS.md
+.claude/
+.codex/
+.agents/
+.beads/
+devdocs/
+openspec/config.yaml
+openspec/changes/
