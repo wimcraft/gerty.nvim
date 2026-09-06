@@ -6,12 +6,12 @@ Named after GERTY, the quiet assistant AI from *Moon* — not a co-pilot that ta
 
 This is a deliberately stripped-down alternative to [ThePrimeagen/99](https://github.com/ThePrimeagen/99): same core mechanism (async subprocess + temp-file output protocol + per-line virtual-text status), a fraction of the surface area — see "What's intentionally not here" below for what was cut.
 
-> **Status: 0.0.1 — work in progress.**
+> **Status: 0.1.0 — work in progress.**
 >
 > This works and is used daily, but it is early. The config shape, the option names and the public API are all still moving, and **releases may break them without a deprecation period**. If that matters to you, pin a tag rather than tracking `main`:
 >
 > ```lua
-> { "rfist/gerty.nvim", tag = "v0.0.1" }
+> { "rfist/gerty.nvim", tag = "v0.1.0" }
 > ```
 >
 > Breaking changes will be called out in the release notes. `require("gerty").version` reports what you have installed.
@@ -142,6 +142,10 @@ If that is not what you want, don't map `ask`. `explain`, `translate` and `gloss
 | `default` | `string?` | first alias, alphabetically | the provider used when a call names none |
 | `op_defaults` | `table<string, string>` | `{}` | per-operation default alias, overriding `default` |
 | `skills` | `string[]` | `{}` | dirs scanned for `<name>/SKILL.md` |
+| `prompt_keys` | `table<string, string\|number>` | `{}` | opt-in prompt hotkey → provider alias or 1-based index; see below |
+| `prompt_highlight` | `boolean` | `true` | colour `$provider`/`/skill` tokens live at the built-in prompt |
+| `prompt_completion` | `boolean` | `true` | `<Tab>`-complete `/skill` and `$provider` tokens at the built-in prompt |
+| `replace_explain` | `boolean` | `true` | let a referenced `/skill` explain a `replace` edit in a float |
 | `context_lines` | `number` | `40` | lines of surrounding context sent with `replace` |
 | `spinner_interval` | `number` | `120` | ms between spinner frame updates |
 | `language.source` | `string` | `"de"` | language code the language ops read |
@@ -239,29 +243,69 @@ Ask: $claude how do I use this function and what does it return?
 Gloss: $local why is this Präteritum?
 ```
 
+`$N` is shorthand for the Nth provider in the reference card's order (the sorted alias list): `$1` is the first, `$2` the second. Typing `$1` beats typing `$some-long-alias`, and it routes exactly the same way.
+
 A small reference window opens next to the prompt listing what you can type:
 
 ```
 Available providers:
-  $claude (claude-sonnet-5) [Claude subscription]
-  $local (google/gemma-4-e4b) [local, free]
-  $pi (openai-codex/gpt-5.6-luna) [Codex subscription]
+  $1  $claude (claude-sonnet-5) [Claude subscription]
+  $2  $local (google/gemma-4-e4b) [local, free]
+  $3  $pi (openai-codex/gpt-5.6-luna) [Codex subscription]
 Available skills:
-  #mentor
-  #version-bump
+  /grammar  -- Fix grammar, spelling, and punctuation errors — nothing else.
+  /plain    -- Rewrite in plain, direct language; keep every fact.
 ```
 
-It's a static card, not a completion popup — it never takes focus and closes when the prompt does. `$notaprovider` is left in your text untouched rather than silently eaten.
+(the skills shown are whatever you've put in your `skills` dirs). The skills section is always shown — if it says `(none — set skills in setup() …)`, you haven't pointed `skills` anywhere yet. It's a static card, not a completion popup — it never takes focus and closes when the prompt does. `$notaprovider`, and a `$N` past the end of the list, are left in your text untouched rather than silently eaten.
 
-`$alias` picks a provider, not a model — model ids like `kilo/deepseek/deepseek-v4-pro` are not things you want to type at a prompt. Use `select_model()` or a per-call `model = "..."` for that.
+On Neovim's built-in prompt (and dressing), `$provider` and `/skill` tokens are **coloured as you type** — one colour when they resolve, a warning colour when they don't (a typo, or a skill you haven't configured) — and `<Tab>` completes them: `/gr<Tab>` → `/grammar`, `$<Tab>` → the provider list, `<Tab>` on an empty prompt → everything. Turn either off with `prompt_highlight = false` / `prompt_completion = false`; restyle the colours with `:hi GertyPromptToken` / `:hi GertyPromptTokenUnknown`. snacks/noice prompts show neither (harmless — the reference card and the on-submit warning still work).
+
+### Prompt hotkeys
+
+`config.prompt_keys` binds a keypress at the prompt to inserting a leading `$alias` token, so you don't type it at all. It's **off by default** — `$N` already covers the common case with nothing to configure and nothing to go wrong. Opt in by mapping keys to providers:
+
+```lua
+gerty.setup({
+  -- each value is a 1-based index into the sorted alias list, or an alias
+  prompt_keys = { ["<C-1>"] = 1, ["<C-2>"] = 2, ["<C-x>l"] = "local" },
+})
+```
+
+Two limitations, both worked around by typing `$N` by hand — which is why the feature is opt-in:
+
+- **Terminal keys.** `<C-1>`…`<C-9>` only reach Neovim as distinct keys under the [kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/) — Ghostty enables it by default, WezTerm needs `enable_kitty_keyboard = true`. Elsewhere they're inert (a bare `1` is inserted, nothing worse). A `<C-x>`-prefix chord like `<C-x>l` works in every terminal.
+- **Custom `vim.ui.input`.** The hotkeys are cmdline-mode maps for the lifetime of the prompt. Neovim's built-in prompt runs in cmdline mode; dressing/snacks/noice run in insert mode in their own buffer and never see them.
+
+`$alias` and `$N` pick a provider, not a model — model ids like `kilo/deepseek/deepseek-v4-pro` are not things you want to type at a prompt. Use `select_model()` or a per-call `model = "..."` for that.
 
 ## Skills
 
-Type `#name` anywhere in a prompt and, if `<skills-dir>/name/SKILL.md` exists, its contents get injected as extra context:
+Type `/name` anywhere in a prompt and, if `<skills-dir>/name/SKILL.md` exists, its contents get injected as extra context:
 
 ```
-#refactor extract this into a helper function
+/refactor extract this into a helper function
 ```
+
+The `/` must start the line or follow a space, so `and/or` and `src/foo.lua` are left alone. A `/name` that matches no discovered skill injects nothing and is left in your instruction untouched — same rule as `$notaprovider` — but you get a one-line warning after you submit, so a typo never silently does nothing.
+
+> Earlier versions used `#name`. It's `/name` now, no `#` fallback.
+
+Point `skills` at one or more directories of `<name>/SKILL.md` files:
+
+```lua
+skills = { "~/.config/nvim/skills/" }
+```
+
+A `SKILL.md` is just prose — its whole contents are injected as `<skill name="…">` context, so a skill is worth writing when you keep pasting the same standing instruction ("proofread this, don't touch the meaning", "rewrite in plain language, keep every fact"). The reference card shows each skill's first heading or line as a one-line gloss. After adding a new one, `require("gerty").refresh_skills()` picks it up without a restart; changing the `skills` list itself needs `setup()` to run again.
+
+### Explaining an edit
+
+When a `/skill` is referenced, `replace` opens a channel for the model to explain what it changed, carried separately from the replacement so it never lands in the buffer: an agentic CLI (`pi`/`claude`) puts it in its reply; a chat model gets a two-field decoding grammar (`{replacement, explanation}`), so the constrained decoding forces the explanation out even on a small local model. How detailed the explanation is comes from the skill's own prose, not gerty.
+
+Be clear about the trigger: it is **any** referenced skill, not only one whose text asks to be explained. The chat grammar marks the field required, so a skilled `replace` produces a note every time. If your skills are pure rewrite instructions and you want none of this, set `replace_explain = false`; a `replace` with no skill is byte-for-byte as before either way.
+
+The corrected text lands in your buffer as usual and the explanation opens in a float, with the changed lines given the persistent `▎` sign and the edit recorded in `gerty.history()`. Unlike the `translate` float, this one **does not take the cursor** — `replace` is an edit op, so you stay where you were editing and the note dismisses itself on your next cursor move. Pick the edit out of history later and the "what changed & why" re-opens from cache and jumps you back to the lines; no new request.
 
 ## Languages
 
@@ -314,7 +358,7 @@ If you implement `read_only`, **deny the shell too**, not just the edit tools: a
 make test        # or: nvim -l tests/run.lua
 ```
 
-80 tests, a few seconds, no dependencies — the suite needs nothing the plugin doesn't already need. Subprocesses are mocked, so nothing is spawned and no model is called.
+118 tests, a few seconds, no dependencies — the suite needs nothing the plugin doesn't already need. Subprocesses are mocked, so nothing is spawned and no model is called.
 
 ```bash
 make test-live   # or: GERTY_TEST_LIVE=1 nvim -l tests/run.lua
@@ -328,4 +372,4 @@ Additionally runs three tests against a real OpenAI-compatible server (LM Studio
 
 ## What's intentionally not here
 
-No request history, no log viewer, no quickfix/search op, no telescope/fzf model picker, no live completion popup for `$providers`/`#skills`/`@files` (just the static hint card), no treesitter function-scope targeting (so `explain` takes a line-wise visual range — you select the function yourself). All were in the original; none survived the cut for v1. `replace` is also still deliberately line-based, unlike `translate`/`gloss`, which read the exact characterwise/blockwise selection. `openspec/specs/` records the reasoning as scenarios, and the open issues track what may yet change.
+No request history, no log viewer, no quickfix/search op, no telescope/fzf model picker, no `@file` completion and no completion *popup* (the prompt has `<Tab>` completion and live colouring for `$providers`/`/skills`, plus the static hint card — but no floating menu), no treesitter function-scope targeting (so `explain` takes a line-wise visual range — you select the function yourself). All were in the original; none survived the cut for v1. `replace` is also still deliberately line-based, unlike `translate`/`gloss`, which read the exact characterwise/blockwise selection. `openspec/specs/` records the reasoning as scenarios, and the open issues track what may yet change.

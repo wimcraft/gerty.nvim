@@ -94,8 +94,11 @@ the model is never told to write to a path it cannot open.
 ### Requirement: Commentary Suppression
 
 The system SHALL instruct the model to return code alone, with no commentary,
-explanation or markdown fences. Where a chat model wraps the entire answer in a
-code fence regardless, the system SHALL remove it.
+explanation or markdown fences, UNLESS a skill has opened the explanation
+channel (see *Explanation Channel For Skilled Edits*), in which case commentary
+is expected but is carried outside the replacement and routed away from the
+buffer. Where a chat model wraps the entire answer in a code fence regardless,
+the system SHALL remove it.
 
 #### Scenario: A whole-answer fence is stripped
 
@@ -106,6 +109,61 @@ code fence regardless, the system SHALL remove it.
 
 - **WHEN** the replacement legitimately contains a fenced block partway through
 - **THEN** it is preserved, because only a fence wrapping the whole answer is removed
+
+#### Scenario: The fence is stripped from the code, not the explanation
+
+- **WHEN** a chat model fences the value of the replacement field
+- **THEN** the fence is removed from that field only; the explanation field is untouched
+
+### Requirement: Explanation Channel For Skilled Edits
+
+WHEN `replace` runs with at least one skill referenced and the channel is not
+disabled by configuration, the system SHALL invite
+the model to explain the change on a channel separate from the replacement so
+it never reaches the buffer, and SHALL leave the depth of that explanation to
+the skill. The channel is transport-specific: on an agentic provider the
+replacement goes to the temp file and the explanation is the model's stdout
+reply; on a chat provider the decoding grammar carries a second required key
+alongside the replacement. The replacement SHALL be applied to the buffer as
+usual. WHEN an explanation is present, the system SHALL show it in a float that
+does NOT take focus -- `replace` is an edit operation, so the cursor SHALL stay
+in the buffer being edited and the float SHALL dismiss itself on the next cursor
+move -- mark the covered lines with the same persistent sign a translation uses,
+and record the edit in history so the explanation can be re-opened later from
+cache without another request. WHEN no usable explanation comes back — an endpoint
+that dropped the second field, an agent that replied with nothing — the
+replacement SHALL be applied and nothing else.
+
+#### Scenario: A skilled edit returns an explanation
+
+- **WHEN** the model applies the correction and returns a description of what it changed
+- **THEN** the corrected text replaces the selection, the explanation opens in a float, the changed lines are signed, and a history entry points at the cached explanation
+
+#### Scenario: No usable explanation comes back
+
+- **WHEN** a skill is active but the response carries no non-empty explanation
+- **THEN** the replacement is applied and nothing else happens — no float, no history entry
+
+#### Scenario: The explanation does not interrupt the edit
+
+- **WHEN** a skilled edit returns an explanation
+- **THEN** the cursor remains in the edited buffer, not in the float
+
+#### Scenario: The channel is turned off
+
+- **WHEN** `replace_explain = false` and a skill is referenced
+- **THEN** the replacement is applied, the chat grammar carries only the
+  replacement field, and no float or history entry is produced
+
+#### Scenario: A plain edit is unaffected
+
+- **WHEN** `replace` runs with no skill referenced
+- **THEN** the prompt is byte-for-byte as before, and the chat grammar has the single replacement field
+
+#### Scenario: Re-opening the explanation
+
+- **WHEN** the user picks a recorded skilled edit from history
+- **THEN** the cached explanation is shown again and the cursor jumps to the edited lines, with no request sent
 
 ### Requirement: Selection Tracking Across Edits
 

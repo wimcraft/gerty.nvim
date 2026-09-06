@@ -69,12 +69,12 @@ after what the operation produces, distinct from the translation field.
 
 ### Requirement: Skill Injection
 
-The system SHALL support `#name` skill references in a gloss instruction,
+The system SHALL support `/name` skill references in a gloss instruction,
 injecting the named skill's contents alongside the task description.
 
 #### Scenario: Glossing with a skill
 
-- **WHEN** the user types an instruction containing `#mentor` at the Gloss prompt
+- **WHEN** the user types an instruction containing `/mentor` at the Gloss prompt
 - **THEN** that skill's contents accompany the request and its name appears in the status text
 
 ### Requirement: Per-Call Overrides

@@ -604,6 +604,123 @@ T.test("replace and explain release their range when the prompt backend throws",
   end
 end)
 
+T.test("prompt_keys maps live only for the prompt, even if it throws", function()
+  gerty.setup({
+    providers = { pi = { models = { "m" } }, claude = { models = { "m" } } },
+    prompt_keys = { ["<C-b>"] = 1, ["<C-x>l"] = "pi" },
+  })
+  local lhs = { "<C-b>", "<C-x>l" }
+
+  -- normal open/close: stub vim.ui.input to observe the maps mid-prompt
+  T.buffer_with_selection({ "a", "b", "c" }, 1, 2)
+  local original = vim.ui.input
+  local seen_during = {}
+  vim.ui.input = function(_, on_confirm)
+    for _, k in ipairs(lhs) do
+      seen_during[k] = vim.fn.maparg(k, "c") ~= ""
+    end
+    on_confirm(nil)
+  end
+  gerty.replace()
+  vim.ui.input = original
+  for _, k in ipairs(lhs) do
+    T.ok(seen_during[k], k .. " was not bound while the prompt was open")
+    T.eq(vim.fn.maparg(k, "c"), "", k .. " outlived the prompt")
+  end
+
+  -- and when the backend explodes before it ever calls back
+  T.buffer_with_selection({ "a", "b", "c" }, 1, 2)
+  vim.ui.input = function()
+    error("input backend exploded")
+  end
+  pcall(gerty.replace)
+  vim.ui.input = original
+  for _, k in ipairs(lhs) do
+    T.eq(vim.fn.maparg(k, "c"), "", k .. " leaked after a prompt-backend error")
+  end
+end)
+
+T.test("the prompt carries a working highlight handler when enabled", function()
+  local dir = vim.fn.tempname()
+  vim.fn.mkdir(dir .. "/grammar", "p")
+  local f = assert(io.open(dir .. "/grammar/SKILL.md", "w"))
+  f:write("# grammar\n\nfix grammar\n")
+  f:close()
+  gerty.setup({
+    providers = { pi = { models = { "m" } }, claude = { models = { "m" } } },
+    skills = { dir },
+  })
+
+  T.buffer_with_selection({ "a", "b", "c" }, 1, 2)
+  local original = vim.ui.input
+  local captured
+  vim.ui.input = function(opts, on_confirm)
+    captured = opts
+    on_confirm(nil)
+  end
+  gerty.replace()
+  vim.ui.input = original
+
+  T.eq(type(captured.highlight), "function", "highlight handler not passed")
+  T.eq(captured.completion, "customlist,v:lua.gerty_prompt_complete")
+  T.ok(captured.cancelreturn == nil, "must not set cancelreturn")
+
+  -- $1 (known) + /grammar (known) both light up as GertyPromptToken;
+  -- /nope lights up as GertyPromptTokenUnknown; a path slash does not
+  local hl = captured.highlight("$1 /grammar /nope src/x.lua")
+  local groups = vim.tbl_map(function(t) return t[3] end, hl)
+  T.eq(#hl, 3, "expected three highlighted spans")
+  T.eq(groups[1], "GertyPromptToken", "$1")
+  T.eq(groups[2], "GertyPromptToken", "/grammar")
+  T.eq(groups[3], "GertyPromptTokenUnknown", "/nope")
+  for i = 2, #hl do
+    T.ok(hl[i][1] >= hl[i - 1][2], "spans must be ordered and non-overlapping")
+  end
+
+  -- never throws, even on nonsense input
+  T.eq(vim.inspect(captured.highlight("")), "{}")
+end)
+
+T.test("highlight / completion keys are absent when their config is off", function()
+  gerty.setup({
+    providers = { pi = { models = { "m" } } },
+    prompt_highlight = false,
+    prompt_completion = false,
+  })
+  T.buffer_with_selection({ "a", "b", "c" }, 1, 2)
+  local original = vim.ui.input
+  local captured
+  vim.ui.input = function(opts, on_confirm)
+    captured = opts
+    on_confirm(nil)
+  end
+  gerty.replace()
+  vim.ui.input = original
+  T.eq(captured.highlight, nil)
+  T.eq(captured.completion, nil)
+end)
+
+T.test("a /token that matches no skill warns on submit", function()
+  gerty.setup({ providers = { pi = { models = { "m" } } } })
+  T.buffer_with_selection({ "a", "b", "c" }, 1, 2)
+  local mock = T.mock_jobs()
+  mock.reply = { status = "ok", output = "x" }
+  local original = vim.ui.input
+  vim.ui.input = function(_, on_confirm)
+    on_confirm("/grammr tidy this")
+  end
+  local messages = T.capture_notify(function()
+    gerty.replace()
+    T.wait_for(function() return mock.last ~= nil end)
+  end)
+  vim.ui.input = original
+  T.unmock_jobs(mock)
+  T.ok(
+    vim.iter(messages):any(function(m) return m:find("not a known skill", 1, true) end),
+    "expected an unknown-skill warning, got: " .. vim.inspect(messages)
+  )
+end)
+
 T.test("a request body that cannot be encoded fails instead of throwing", function()
   gerty.setup({
     providers = {

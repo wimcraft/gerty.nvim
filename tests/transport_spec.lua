@@ -83,6 +83,33 @@ T.test("a code answer gets no prose sentinel", function()
   local schema = schema_of(mock)
   T.ok(schema.properties.replacement, "field is `replacement`")
   T.eq(schema.properties.replacement.pattern, nil, "no decoding sentinel")
+  T.eq(schema.properties.explanation, nil, "no explanation field without a skill")
+  T.eq(#schema.required, 1)
+  T.unmock_jobs(mock)
+end)
+
+T.test("a chat replace with explain gets a two-field grammar", function()
+  local mock = T.mock_jobs()
+  transport.send(lm, prompt.replace({
+    instruction = "x", filetype = "lua", selection = "y", context = "",
+    skills = { "<skill>" }, agentic = false, explain = true,
+  }), noop)
+  local schema = schema_of(mock)
+  T.ok(schema.properties.replacement)
+  T.ok(schema.properties.explanation, "the second field is `explanation`")
+  T.eq(#schema.required, 2, "both are required so decoding forces the note out")
+  T.eq(schema.additionalProperties, false)
+
+  -- and the extra field is unwrapped onto result.extra
+  local out = transport.decode_openai(
+    T.chat_response(vim.json.encode({
+      replacement = "fixed", explanation = "  changed a to b  ",
+    })),
+    lm,
+    { response_field = "replacement", response_field_extra = "explanation", response_prose = false }
+  )
+  T.eq(out.output, "fixed")
+  T.eq(out.extra, "changed a to b", "trimmed as prose")
   T.unmock_jobs(mock)
 end)
 

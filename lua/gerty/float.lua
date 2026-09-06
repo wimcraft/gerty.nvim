@@ -14,10 +14,18 @@ local function to_lines(text)
 end
 
 --- Opens a centred, bordered markdown float. `q` and `<Esc>` close it.
+---
+--- `opts.focus = false` leaves the cursor where it was and dismisses the float
+--- on the next cursor move, the way an LSP hover does. That is the right shape
+--- when the float accompanies an action the user asked for rather than being
+--- the answer they asked for -- `replace` puts its explanation here, and having
+--- an edit yank the cursor out of the buffer is worse than missing the note.
 --- @param title string
 --- @param text string
+--- @param opts { focus: boolean|nil }|nil
 --- @return number|nil win nil if there was nothing to show
-function M.show(title, text)
+function M.show(title, text, opts)
+  local focus = not (opts and opts.focus == false)
   local lines = to_lines(text)
   if #lines == 0 or (#lines == 1 and lines[1] == "") then
     return nil
@@ -34,7 +42,7 @@ function M.show(title, text)
   local height =
     math.max(3, math.min(max_height, textwidth.wrapped_height(lines, width)))
 
-  local win = vim.api.nvim_open_win(buf, true, {
+  local win = vim.api.nvim_open_win(buf, focus, {
     relative = "editor",
     width = width,
     height = height,
@@ -57,6 +65,34 @@ function M.show(title, text)
         vim.api.nvim_win_close(win, true)
       end
     end, { buffer = buf, nowait = true, silent = true })
+  end
+
+  -- An unfocused float has nowhere to send `q` to, so it needs its own way
+  -- out: the next cursor move in the window that kept focus closes it.
+  -- Scheduled a tick late so the buffer edit that produced this float does not
+  -- immediately dismiss it, and guarded so moving around *inside* the float
+  -- (after a deliberate `<C-w>w`) does not either.
+  if not focus then
+    vim.schedule(function()
+      if not vim.api.nvim_win_is_valid(win) then
+        return
+      end
+      vim.api.nvim_create_autocmd(
+        { "CursorMoved", "CursorMovedI", "InsertEnter" },
+        {
+          callback = function()
+            if not vim.api.nvim_win_is_valid(win) then
+              return true
+            end
+            if vim.api.nvim_get_current_win() == win then
+              return
+            end
+            vim.api.nvim_win_close(win, true)
+            return true
+          end,
+        }
+      )
+    end)
   end
 
   return win

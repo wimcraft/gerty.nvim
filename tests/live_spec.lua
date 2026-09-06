@@ -90,3 +90,26 @@ T.test("live: a code replacement keeps its indentation", function()
   T.ok(first:match("^    "), "indentation lost: [" .. first .. "]")
   T.ok(result.output:find("total", 1, true), "the rename was not applied")
 end)
+
+T.test("live: a skilled replace fills both replacement and explanation", function()
+  local result = ask(prompt.replace({
+    instruction = "fix the grammar",
+    filetype = "text",
+    selection = "I going ride my bicicle",
+    context = "I going ride my bicicle",
+    skills = {
+      "<skill name=\"grammar\">\nCorrect grammar and spelling. Also explain each"
+        .. " fix: name the error, quote before and after, state the rule.\n</skill>",
+    },
+    agentic = false,
+    explain = true,
+  }))
+  T.ok(
+    result.output:lower():find("bicycle", 1, true),
+    "the replacement field lost the correction: " .. result.output
+  )
+  T.ok(
+    result.extra and #result.extra > 30,
+    "the explanation field came back empty or trivial: " .. tostring(result.extra)
+  )
+end)

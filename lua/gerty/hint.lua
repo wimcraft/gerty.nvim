@@ -1,5 +1,5 @@
 --- A static reference card shown beside a `vim.ui.input()` prompt: which
---- agents can be named inline with `$alias`, which skills with `#name`.
+--- providers can be named inline with `$alias`, which skills with `/name`.
 ---
 --- Deliberately the cheap version of completion -- it never takes focus,
 --- never intercepts a keystroke, and closes as soon as the input resolves.
@@ -15,9 +15,10 @@ local M = {}
 --- A plain list of lines reads as a wall of text once it's several entries
 --- long. Rather than teach every caller to build styled segments, this finds
 --- the same few shapes automatically: a line ending in `:` is a section
---- header, a leading `$name`/`#name` token is what you'd actually type, and
---- any trailing `(...)`/`[...]` is metadata -- so it's the least important
---- part to read at a glance.
+--- header, every `$name`/`/name` token is something you could actually type
+--- (a provider line now carries two -- `$1` and `$alias`), and any trailing
+--- `(...)`/`[...]` or `-- gloss` is metadata, so it's the least important part
+--- to read at a glance.
 --- @param buf number
 --- @param lines string[]
 local function highlight(buf, lines)
@@ -29,12 +30,19 @@ local function highlight(buf, lines)
         hl_group = "Title",
       })
     else
-      local lead_start, lead_end = line:find("^%s*[%$#]%S+")
-      if lead_start then
-        vim.api.nvim_buf_set_extmark(buf, ns, row, lead_start - 1, {
-          end_col = lead_end,
-          hl_group = "Special",
-        })
+      -- tokens in the entry's head only (before any `  -- gloss`), and only
+      -- where a `$`/`/` sits at a word start -- so a `/` inside gloss prose
+      -- ("and/or") or a model id in parens isn't lit up like something you'd type
+      local head = line:match("^(.-)%s%-%-%s") or line
+      for tok_start, tok_end in head:gmatch("()[%$/][%w][%w._-]*()") do
+        local prev = tok_start > 1 and head:sub(tok_start - 1, tok_start - 1)
+          or ""
+        if prev == "" or prev:match("%s") then
+          vim.api.nvim_buf_set_extmark(buf, ns, row, tok_start - 1, {
+            end_col = tok_end - 1,
+            hl_group = "Special",
+          })
+        end
       end
       for match_start, match_end in line:gmatch("()%b()()") do
         vim.api.nvim_buf_set_extmark(buf, ns, row, match_start - 1, {

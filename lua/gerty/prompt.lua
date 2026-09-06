@@ -81,23 +81,61 @@ end
 --- fixed range, so that indentation is the replacement's own and has to
 --- survive.
 ---
---- @param opts { instruction: string, filetype: string, selection: string, context: string, tmp_file: string|nil, skills: string[], agentic: boolean|nil }
+--- `explain`, set only when a skill is active, opens an explanation channel.
+--- The transports carry it differently:
+---
+---  * an **agentic** provider writes the code to the temp file with its own
+---    tools and its stdout *reply* becomes the explanation. (An earlier
+---    version asked it to append a delimiter + prose to the file it was told
+---    to fill; models just wrote the file and stopped.)
+---  * a **chat** provider gets a two-key grammar -- `{ replacement,
+---    explanation }`, both required -- so constrained decoding forces the
+---    explanation out. Trying to fit code + a delimiter + prose into the one
+---    `replacement` string fought the "begin with the code" anchor and a
+---    small model produced nothing after the code.
+---
+--- Either way gerty stays neutral on *how much* to explain -- that's the
+--- skill's call. When `explain` is false the wording is byte-for-byte what it
+--- has always been, so a plain `replace` is unperturbed (the local-model
+--- phrasing here is measured, not casual).
+---
+--- @param opts { instruction: string, filetype: string, selection: string, context: string, tmp_file: string|nil, skills: string[], agentic: boolean|nil, explain: boolean|nil }
 --- @return gerty.Prompt
 function M.replace(opts)
   local agentic = opts.agentic ~= false
+  local explain = opts.explain == true
   local parts = {
     "You are editing code inside a Neovim buffer.",
     "Rewrite ONLY the <selection> below according to <instruction>.",
-    agentic
-        and string.format(
-          "Write the replacement code, and nothing else, to the file at %s. "
-            .. "Do not add commentary, explanations, or markdown code fences. "
-            .. "Do not modify any file other than that one.",
-          opts.tmp_file
-        )
-      or "Return the replacement code and nothing else -- no commentary, no "
-        .. "explanation, no markdown code fences. Reproduce the selection's "
-        .. "own indentation on every line, including the first.",
+    explain and (
+      agentic
+          and string.format(
+            "Write the corrected code, and nothing else, to the file at %s -- "
+              .. "no markdown code fences, and modify no other file. THEN make "
+              .. "your reply an explanation of the changes: what you changed and "
+              .. "why, at whatever depth <instruction> or a skill asks for. Do "
+              .. "not repeat the corrected text in your reply. If you changed "
+              .. "nothing, reply with nothing.",
+            opts.tmp_file
+          )
+        or "Put the corrected code -- no markdown code fences, the selection's "
+          .. "own indentation preserved on every line -- in the `replacement` "
+          .. "field. Put an explanation of the changes in the `explanation` "
+          .. "field: what you changed and why, at whatever depth <instruction> "
+          .. "or a skill asks for. If nothing needed changing, return the text "
+          .. "unchanged in `replacement` and say so in `explanation`."
+    ) or (
+      agentic
+          and string.format(
+            "Write the replacement code, and nothing else, to the file at %s. "
+              .. "Do not add commentary, explanations, or markdown code fences. "
+              .. "Do not modify any file other than that one.",
+            opts.tmp_file
+          )
+        or "Return the replacement code and nothing else -- no commentary, no "
+          .. "explanation, no markdown code fences. Reproduce the selection's "
+          .. "own indentation on every line, including the first."
+    ),
   }
 
   if #opts.skills > 0 then
@@ -124,13 +162,16 @@ function M.replace(opts)
   if not agentic then
     table.insert(
       parts,
-      "Begin your reply with the replacement code itself."
+      explain
+          and "Fill `replacement` with the corrected code itself, no preamble."
+        or "Begin your reply with the replacement code itself."
     )
   end
 
   return {
     user = table.concat(parts, "\n\n"),
     response_field = not agentic and "replacement" or nil,
+    response_field_extra = (not agentic and explain) and "explanation" or nil,
     response_prose = false,
   }
 end

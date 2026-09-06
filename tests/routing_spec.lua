@@ -47,6 +47,44 @@ T.test("an unknown $token is left in the prompt", function()
   T.unmock_jobs(mock)
 end)
 
+T.test("$N routes to the Nth provider in sorted order", function()
+  setup()
+  -- provider_names sorts to { claude, local, pi }
+  local mock = T.mock_jobs()
+  gerty.ask({ instruction = "$1 do a thing" })
+  T.eq(mock.last.cmd[1], "claude", "$1 is the first provider")
+  local sent = mock.last.cmd[#mock.last.cmd]
+  T.ok(not sent:find("$1", 1, true), "the token must not reach the model")
+  T.ok(sent:find("do a thing", 1, true))
+
+  gerty.ask({ instruction = "$3 do a thing" })
+  T.eq(mock.last.cmd[1], "pi", "$3 is the third provider")
+  T.unmock_jobs(mock)
+end)
+
+T.test("an out-of-range $N is left in the prompt", function()
+  setup()
+  local mock = T.mock_jobs()
+  gerty.ask({ instruction = "$9 do a thing" })
+  T.eq(mock.last.cmd[1], "pi", "falls through to the default")
+  T.ok(
+    mock.last.cmd[#mock.last.cmd]:find("$9 do a thing", 1, true),
+    "an index past the provider list is a typo, not a token to eat"
+  )
+  T.unmock_jobs(mock)
+end)
+
+T.test("$N feeds the same capability guard as $alias", function()
+  setup()
+  local mock = T.mock_jobs()
+  T.raises(function()
+    -- $2 is `local`, a chat-only provider
+    gerty.ask({ instruction = "$2 rewrite everything" })
+  end, "chat-only")
+  T.eq(mock.calls, 0)
+  T.unmock_jobs(mock)
+end)
+
 T.test("ask refuses a chat-only provider before anything is sent", function()
   setup()
   local mock = T.mock_jobs()

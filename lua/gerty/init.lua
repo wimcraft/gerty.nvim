@@ -9,6 +9,7 @@ local history = require("gerty.history")
 local hint = require("gerty.hint")
 local Spinner = require("gerty.status")
 local float = require("gerty.float")
+local prompt_tokens = require("gerty.prompt_tokens")
 
 local marks_ns = vim.api.nvim_create_namespace("gerty.marks")
 --- Persistent sign marking a line a translate/gloss answer covered -- unlike
@@ -22,7 +23,7 @@ local M = {}
 --- Semantic version, so a bug report can say which gerty it came from:
 --- `:lua print(require("gerty").version)`. Bump it in the same commit as the
 --- git tag, or the two drift and the field becomes worse than useless.
-M.version = "0.0.1"
+M.version = "0.1.0"
 
 --- @type gerty.Config|nil
 local cfg
@@ -49,10 +50,33 @@ local active = {}
 --- @type table<string, boolean>
 local AGENTIC_OPS = { ask = true }
 
+--- The two groups the prompt highlight handler paints with. `default = true`
+--- so a user's own `:hi GertyPromptToken ...` wins. The "unknown" one is
+--- re-derived on `:colorscheme` because it copies a colour rather than
+--- linking (a link can't also carry `underline`).
+local function define_highlights()
+  vim.api.nvim_set_hl(0, "GertyPromptToken", { link = "String", default = true })
+  local function unknown()
+    local ok, warn =
+      pcall(vim.api.nvim_get_hl, 0, { name = "DiagnosticWarn", link = false })
+    vim.api.nvim_set_hl(0, "GertyPromptTokenUnknown", {
+      fg = ok and warn and warn.fg or nil,
+      underline = true,
+      default = true,
+    })
+  end
+  unknown()
+  vim.api.nvim_create_autocmd("ColorScheme", {
+    group = vim.api.nvim_create_augroup("gerty.highlights", { clear = true }),
+    callback = unknown,
+  })
+end
+
 --- @param opts gerty.Config|nil
 function M.setup(opts)
   cfg = config.resolve(opts)
   skill_map = skills.discover(cfg.skills)
+  define_highlights()
 end
 
 --- Re-scan the configured skill directories, e.g. after adding a new SKILL.md.
@@ -481,12 +505,27 @@ end
 --- the prompt. Anything else -- `$notaprovider`, a `$` in the middle of a
 --- sentence -- is left in the instruction untouched, because silently eating
 --- part of someone's prompt is worse than ignoring a typo.
+---
+--- `$N` (a bare number) is shorthand for the Nth provider in the reference
+--- card's order -- the sorted `cfg.provider_names` -- so `$1` is the first,
+--- `$2` the second. It exists so you don't have to type `$some-long-alias`.
+--- An out-of-range number matches nothing and is left in the instruction like
+--- any other unrecognised `$token`.
 --- @param instruction string
 --- @return string|nil provider alias
 --- @return string the instruction with the token removed, if one matched
 local function split_alias(instruction)
   local name, rest = instruction:match("^%s*%$(%S+)%s*(.*)$")
-  if name and cfg.providers[name] then
+  if not name then
+    return nil, instruction
+  end
+  local index = name:match("^%d+$") and tonumber(name)
+  if index then
+    local alias = cfg.provider_names[index]
+    if alias then
+      return alias, rest
+    end
+  elseif cfg.providers[name] then
     return name, rest
   end
   return nil, instruction
@@ -494,46 +533,229 @@ end
 
 --- One entry per line rather than one giant comma-joined paragraph -- past
 --- two or three providers the joined version just ran off the window with
---- nothing to visually anchor on. hint.lua colors the leading `$`/`#` token
---- and the trailing `(...)`/`[...]` metadata on each of these automatically.
+--- nothing to visually anchor on. hint.lua colors the leading `$`/`/` token
+--- and the trailing `(...)`/`[...]`/`-- gloss` metadata on each automatically.
+---
+--- The skills section is always shown, even with nothing discovered -- an
+--- empty `skills` config is the common reason someone can't find the feature,
+--- so the card says how to point it somewhere rather than staying silent.
 --- @return string[]
 local function hint_lines()
   local lines = {}
 
   if #cfg.provider_names > 1 then
     table.insert(lines, "Available providers:")
-    for _, alias in ipairs(cfg.provider_names) do
-      table.insert(lines, "  $" .. provider_label(alias))
+    for i, alias in ipairs(cfg.provider_names) do
+      -- "$1  $claude (model) [billing]": both tokens resolve to the same
+      -- provider -- `$1` is the short form the hotkeys type for you, `$claude`
+      -- the one you'd write by hand.
+      table.insert(lines, string.format("  $%d  $%s", i, provider_label(alias)))
     end
   end
 
   local names = vim.tbl_keys(skill_map)
   table.sort(names)
-  if #names > 0 then
-    table.insert(lines, "Available skills:")
+  table.insert(lines, "Available skills:")
+  if #names == 0 then
+    table.insert(
+      lines,
+      "  (none -- set `skills` in setup() to a dir of <name>/SKILL.md files)"
+    )
+  else
     for _, name in ipairs(names) do
-      table.insert(lines, "  #" .. name)
+      local desc = skills.summary(skill_map[name], name)
+      table.insert(
+        lines,
+        desc and string.format("  /%s  -- %s", name, desc) or ("  /" .. name)
+      )
     end
   end
 
   return lines
 end
 
---- vim.ui.input() with the `$alias`/`#skill` reference card alongside it. The
---- card closes on submit *and* on cancel, because vim.ui.input calls back
---- either way.
+--- The `prompt_keys` hotkeys: a keypress at the prompt that inserts a leading
+--- `$alias` token so you don't have to type `$some-long-alias` every time. The
+--- maps are cmdline-mode, installed only while the prompt is open and removed
+--- (restoring anything they shadowed) the moment it resolves -- they touch
+--- nothing outside the prompt.
+---
+--- `cfg.prompt_keys` is empty unless the user opts in -- `$N` typed by hand is
+--- the zero-config path. This works with Neovim's built-in `vim.ui.input`,
+--- which runs in cmdline mode. A custom one (dressing, snacks, noice) edits
+--- its own buffer in insert mode and never enters cmdline mode, so the maps
+--- do not fire there -- `$N` by hand still does. A `<C-N>` binding also needs
+--- a terminal that sends it as a distinct key (the kitty keyboard protocol:
+--- Ghostty has it on, WezTerm opts in); a `<C-x>`-prefix chord does not.
+--- @return fun() removes the installed maps and restores what they shadowed
+local function install_prompt_keys()
+  local restore = {}
+  for lhs, target in pairs(cfg.prompt_keys) do
+    local alias = type(target) == "number" and cfg.provider_names[target]
+      or target
+    -- a numeric key past the end of the provider list is simply inert
+    if type(alias) == "string" and cfg.providers[alias] then
+      local token = "$" .. alias
+      local shadowed = vim.fn.maparg(lhs, "c", false, true)
+      vim.keymap.set("c", lhs, function()
+        local line = vim.fn.getcmdline()
+        -- don't stack a second token if one is already there
+        if line:match("^%s*%$%S+") then
+          return
+        end
+        local prefix = token .. (line == "" and "" or " ")
+        vim.fn.setcmdline(prefix .. line, #prefix + 1)
+      end, { desc = "gerty: route this call to " .. alias })
+      table.insert(restore, function()
+        pcall(vim.keymap.del, "c", lhs)
+        if not vim.tbl_isempty(shadowed) then
+          pcall(vim.fn.mapset, "c", false, shadowed)
+        end
+      end)
+    end
+  end
+  return function()
+    for _, fn in ipairs(restore) do
+      fn()
+    end
+  end
+end
+
+--- The scanner context, rebuilt each prompt so a runtime provider or skill
+--- change is picked up.
+--- @return gerty.TokenContext
+local function token_ctx()
+  return {
+    providers = cfg.providers,
+    provider_names = cfg.provider_names,
+    skill_map = skill_map,
+  }
+end
+
+--- `vim.fn.input`'s `highlight` handler: colour a resolving `$provider`/`/skill`
+--- token one way and a non-resolving one (a typo, a not-yet-configured skill)
+--- another, so the mistake is visible before you submit. Must never raise --
+--- Neovim disables highlighting for the rest of the prompt on any error
+--- (`:help input()-highlight`) -- hence the pcall and the clamping.
+--- @param input string
+--- @return table[] {from, to, hl_group}, 0-indexed bytes, ordered, non-overlapping
+local function prompt_highlighter(input)
+  local ok, tokens = pcall(prompt_tokens.scan, input, token_ctx())
+  if not ok then
+    return {}
+  end
+  local out = {}
+  local len = #input
+  local last_to = 0
+  for _, tok in ipairs(tokens) do
+    local from = tok.from
+    local to = math.min(tok.to, len)
+    if from >= last_to and from < to and from < len then
+      out[#out + 1] = {
+        from,
+        to,
+        tok.known and "GertyPromptToken" or "GertyPromptTokenUnknown",
+      }
+      last_to = to
+    end
+  end
+  return out
+end
+
+--- Backs `completion = "customlist,v:lua.gerty_prompt_complete"`. A `_G`
+--- global is the documented way to reach a Lua function from a `v:lua`
+--- completion spec; this one closes over the file-local `cfg`/`skill_map`,
+--- both reassigned by setup()/refresh_skills(), so it always sees the current
+--- state. `customlist` means we filter ourselves.
+--- @param arg_lead string the word being completed (may start with `/` or `$`)
+--- @return string[]
+function _G.gerty_prompt_complete(arg_lead)
+  if not cfg then
+    return {}
+  end
+
+  local skill_items = {}
+  local skill_names = vim.tbl_keys(skill_map)
+  table.sort(skill_names)
+  for _, name in ipairs(skill_names) do
+    skill_items[#skill_items + 1] = "/" .. name
+  end
+
+  local provider_items = {}
+  for _, alias in ipairs(cfg.provider_names) do
+    provider_items[#provider_items + 1] = "$" .. alias
+  end
+  for i = 1, #cfg.provider_names do
+    provider_items[#provider_items + 1] = "$" .. i
+  end
+
+  local function with_prefix(list, pre)
+    return vim.tbl_filter(function(item)
+      return item:sub(1, #pre) == pre
+    end, list)
+  end
+
+  if arg_lead:sub(1, 1) == "/" then
+    return with_prefix(skill_items, arg_lead)
+  elseif arg_lead:sub(1, 1) == "$" then
+    return with_prefix(provider_items, arg_lead)
+  end
+  -- bare <Tab>: offer everything
+  local all = vim.list_extend({}, skill_items)
+  return vim.list_extend(all, provider_items)
+end
+
+--- vim.ui.input() with the `$alias`/`/skill` reference card alongside it, the
+--- `prompt_keys` hotkeys bound for its lifetime, and -- on the built-in prompt
+--- -- live token highlighting and `<Tab>` completion. The card closes and the
+--- hotkeys are removed on submit *and* on cancel, because vim.ui.input calls
+--- back either way.
+---
+--- `highlight`/`completion` are passed straight through to `vim.fn.input` by
+--- the built-in `vim.ui.input`; dressing honours them too, snacks/noice
+--- ignore them. `cancelreturn` is deliberately NOT set -- `vim.ui.input`
+--- needs to own it to tell cancel from an empty submit.
 --- @param label string
 --- @param on_submit fun(instruction: string|nil)
 local function input_with_hint(label, on_submit)
   local close = hint.open(hint_lines())
-  local ok, err = pcall(vim.ui.input, { prompt = label }, function(instruction)
+  local restore_keys = install_prompt_keys()
+  local function teardown()
     close()
+    restore_keys()
+  end
+  local opts = { prompt = label }
+  if cfg.prompt_highlight then
+    opts.highlight = prompt_highlighter
+  end
+  if cfg.prompt_completion then
+    opts.completion = "customlist,v:lua.gerty_prompt_complete"
+  end
+  local ok, err = pcall(vim.ui.input, opts, function(instruction)
+    teardown()
     on_submit(instruction)
   end)
   if not ok then
-    close()
+    teardown()
     error(err)
   end
+end
+
+--- skills.resolve() plus a nudge when a `/token` matched no discovered skill.
+--- Without it a typo (`/grammr`) just silently does nothing, which is the
+--- other half of "I have no clue if a skill was applied".
+--- @param instruction string
+--- @return string[] names
+--- @return string[] contents
+local function resolve_skills(instruction)
+  local names, contents, unknown = skills.resolve(instruction, skill_map)
+  if #unknown > 0 then
+    vim.notify(
+      "gerty: not a known skill, ignored: /" .. table.concat(unknown, ", /"),
+      vim.log.levels.WARN
+    )
+  end
+  return names, contents
 end
 
 --- Also reached from completion callbacks, by which time the buffer may have
@@ -595,6 +817,49 @@ local function strip_code_fence(text)
   return table.concat(vim.list_slice(lines, 2, last - 1), "\n")
 end
 
+--- The explanation half of a skilled `replace`: same float / persistent sign /
+--- history machinery `translate` and `gloss` use, so the "what changed & why"
+--- can be re-opened later from `gerty.history()` without another request.
+--- Called only after the replacement itself has landed in the buffer.
+--- @param buf number
+--- @param s number 1-indexed inclusive -- the lines the rewrite now occupies
+--- @param e number 1-indexed inclusive
+--- @param instruction string
+--- @param skill_names string[]
+--- @param notes string
+local function show_replace_notes(buf, s, e, instruction, skill_names, notes)
+  local title = string.format(
+    "gerty: %s:%d-%d — changes",
+    vim.fn.fnamemodify(buffer_name(buf), ":t"),
+    s,
+    e
+  )
+  -- deliberately unfocused: `replace` is an edit op, and the note is a side
+  -- channel. It dismisses itself on your next cursor move.
+  float.show(title, notes, { focus = false })
+  mark_translated(buf, s, e)
+
+  -- a fresh key every call: unlike translate, an edit's explanation is a
+  -- one-off event, not an answer worth serving again to an identical request
+  local cache_key = "replace-notes:" .. vim.fn.rand()
+  cache.set(cache_key, notes)
+
+  local trimmed = vim.trim(instruction)
+  local label = string.format(
+    "[fix] %s%s",
+    truncate(trimmed ~= "" and trimmed or "edit", 60),
+    #skill_names > 0 and ("  (" .. table.concat(skill_names, ", ") .. ")") or ""
+  )
+  history.record({
+    op = "replace",
+    label = label,
+    cache_key = cache_key,
+    buf = buf,
+    start_row = s,
+    end_row = e,
+  })
+end
+
 --- Two ways home, chosen by what the provider can actually do.
 ---
 --- An agentic provider writes the replacement to a temp file and touches
@@ -636,8 +901,14 @@ local function do_replace(range, instruction, model, provider_name)
   end
   local agentic = transport.is_agentic(provider)
   local selected = range.text
-  local skill_names, skill_contents = skills.resolve(instruction, skill_map)
+  local skill_names, skill_contents = resolve_skills(instruction)
   local tmp_file = agentic and vim.fn.tempname() or nil
+  -- A skill can ask the model to explain the edit. The channel opens when one
+  -- is active -- so a bare "rename x to y" never sprouts a note -- and the
+  -- chat grammar makes the field required, so with a skill you get a note
+  -- every time. `replace_explain = false` is the way out for someone whose
+  -- skills are pure rewrite instructions and who wants none of it.
+  local explain = cfg.replace_explain and #skill_names > 0
 
   local request = prompt.replace({
     instruction = instruction,
@@ -647,6 +918,7 @@ local function do_replace(range, instruction, model, provider_name)
     tmp_file = tmp_file,
     skills = skill_contents,
     agentic = agentic,
+    explain = explain,
   })
 
   local label = status_label("replacing", provider, skill_names)
@@ -679,7 +951,26 @@ local function do_replace(range, instruction, model, provider_name)
         end
         pcall(os.remove, tmp_file)
       elseif result.status == "ok" then
-        lines = vim.split(strip_code_fence(result.output), "\n", { plain = true })
+        lines = vim.split(
+          strip_code_fence(result.output),
+          "\n",
+          { plain = true }
+        )
+      end
+
+      -- Where a skill's explanation comes from depends on the transport. An
+      -- agentic CLI wrote the code to the temp file with its own tools, so its
+      -- *reply* (stdout) is the explanation. A chat model was given a two-key
+      -- grammar, so transport.lua already unwrapped the second field onto
+      -- `result.extra`.
+      local notes
+      if explain and result.status == "ok" then
+        if tmp_file then
+          local reply = vim.trim(result.output or "")
+          notes = reply ~= "" and reply or nil
+        else
+          notes = result.extra
+        end
       end
 
       -- Resolve before releasing, and release on every outcome -- an
@@ -720,6 +1011,17 @@ local function do_replace(range, instruction, model, provider_name)
       end
 
       vim.api.nvim_buf_set_lines(buf, write_start, write_end + 1, false, lines)
+
+      if notes then
+        show_replace_notes(
+          buf,
+          write_start + 1,
+          write_start + #lines,
+          instruction,
+          skill_names,
+          notes
+        )
+      end
     end,
   })
 
@@ -755,7 +1057,7 @@ local function do_explain(range, instruction, model, provider_name)
   instruction = rest
   local provider = pick_provider("explain", alias or provider_name)
   local selected = range.text
-  local skill_names, skill_contents = skills.resolve(instruction, skill_map)
+  local skill_names, skill_contents = resolve_skills(instruction)
 
   local request = prompt.explain({
     instruction = instruction,
@@ -812,7 +1114,7 @@ local function do_ask(instruction, model, provider_name)
   instruction = rest
   local provider = pick_provider("ask", alias or provider_name)
   local buf = vim.api.nvim_get_current_buf()
-  local skill_names, skill_contents = skills.resolve(instruction, skill_map)
+  local skill_names, skill_contents = resolve_skills(instruction)
   local line = vim.api.nvim_win_get_cursor(0)[1] - 1
 
   local request = prompt.ask({
@@ -1051,7 +1353,7 @@ local function do_gloss(sel, instruction, opts)
   end
   local lang = language_for(opts)
   local before, after = selection.context(sel, lang.context_lines)
-  local skill_names, skill_contents = skills.resolve(instruction, skill_map)
+  local skill_names, skill_contents = resolve_skills(instruction)
   local model = opts.model or provider.model
   local title = string.format("gerty: gloss %d-%d", sel.start_row, sel.end_row)
 
@@ -1362,10 +1664,11 @@ function M.clear_cache()
   vim.notify("gerty: cache cleared", vim.log.levels.INFO)
 end
 
---- Prompts with vim.ui.select over recent translate/gloss/word lookups,
---- most recent first. Picking one (Enter) jumps back to where it came from
---- if that buffer/line still exists, and shows the cached answer -- no
---- request is sent, even if the entry has since fallen out of cache (in
+--- Prompts with vim.ui.select over recent translate/gloss/word lookups and
+--- skilled `replace` edits, most recent first. Picking one (Enter) jumps back
+--- to where it came from if that buffer/line still exists, and shows the
+--- cached answer (a translation, a gloss, or an edit's "what changed" note) --
+--- no request is sent, even if the entry has since fallen out of cache (in
 --- which case you're told to look it up again instead).
 function M.history()
   assert(cfg, "gerty: call setup() first")

@@ -83,6 +83,10 @@ local provider_types = require("gerty.providers")
 --- @field provider_names string[] aliases, sorted -- stable order for pickers
 --- @field default string alias used when a call names none
 --- @field op_defaults table<string, string> per-operation default alias
+--- @field prompt_keys table<string, string|number> prompt-hotkey lhs -> provider alias, or a 1-based index into `provider_names`; inserts a leading `$alias` token at the built-in prompt
+--- @field prompt_highlight boolean colour `$provider`/`/skill` tokens live at the built-in prompt (green when they resolve, warn colour when they do not)
+--- @field prompt_completion boolean `<Tab>`-complete `/skill` and `$provider` tokens at the built-in prompt
+--- @field replace_explain boolean let a referenced skill explain a `replace` edit in a float
 --- @field skills string[] directories to scan for <name>/SKILL.md files
 --- @field context_lines number lines of surrounding context sent for `replace`
 --- @field spinner_interval number ms between spinner frame updates
@@ -107,6 +111,23 @@ local defaults = {
   providers = {},
   default = nil,
   op_defaults = {},
+  -- Off by default, and deliberately so: a keymap here that the terminal
+  -- can't deliver (`<C-1>` needs the kitty keyboard protocol; typed `$N`
+  -- never does) would just sit there doing nothing, and this project has
+  -- turned down a silently-degrading prompt keymap once already. Opt in with
+  -- e.g. `prompt_keys = { ["<C-1>"] = 1, ["<C-2>"] = 2 }` -- each value is a
+  -- 1-based index into the sorted alias list, or a provider alias.
+  prompt_keys = {},
+  -- both on: they only touch the built-in prompt, degrade to nothing on a
+  -- custom `vim.ui.input`, and are the answer to "which /skills exist and did
+  -- mine apply". Set either false to opt out.
+  prompt_highlight = true,
+  prompt_completion = true,
+  -- On, but worth knowing what it costs: with a skill referenced the chat
+  -- grammar makes the explanation field *required*, so a skilled `replace`
+  -- produces a note every time, not only when the skill asked for one. If
+  -- your skills are pure rewrite instructions, turn this off.
+  replace_explain = true,
   skills = {},
   context_lines = 40,
   spinner_interval = 120,
@@ -284,6 +305,12 @@ local function restore_list_overrides(cfg, opts)
   if opts.providers then
     cfg.providers = vim.deepcopy(opts.providers)
   end
+  -- what the user passes IS the binding set, not a patch on top of one --
+  -- same treatment as `providers`, and it keeps behaviour predictable if a
+  -- non-empty default is ever reintroduced.
+  if opts.prompt_keys then
+    cfg.prompt_keys = vim.deepcopy(opts.prompt_keys)
+  end
 end
 
 --- @param opts gerty.Config|nil
@@ -338,6 +365,39 @@ function M.resolve(opts)
     )
   end
 
+  -- prompt_keys: each value is a provider alias or a 1-based index into the
+  -- sorted provider list. A bad one here would otherwise be a keypress that
+  -- silently does nothing, with no hint as to why.
+  assert(
+    type(cfg.prompt_keys) == "table",
+    "gerty: config.prompt_keys must be a table of `lhs` -> provider alias or index"
+  )
+  for lhs, target in pairs(cfg.prompt_keys) do
+    assert(
+      type(lhs) == "string",
+      "gerty: config.prompt_keys keys are keymap left-hand sides, e.g. '<C-1>'"
+    )
+    -- The range check matters as much as the type check: an index past the
+    -- end of the provider list would install a key that does nothing at all,
+    -- which is precisely the silent failure this block exists to prevent.
+    local ok_target = (
+      type(target) == "number"
+      and target == math.floor(target)
+      and target >= 1
+      and target <= #cfg.provider_names
+    ) or (type(target) == "string" and resolved[target] ~= nil)
+    assert(
+      ok_target,
+      string.format(
+        "gerty: config.prompt_keys['%s'] must be a 1-based provider index "
+          .. "(1-%d) or one of: %s",
+        lhs,
+        #cfg.provider_names,
+        table.concat(cfg.provider_names, ", ")
+      )
+    )
+  end
+
   -- A wrong type here is accepted silently and then fails deep inside an
   -- operation, as arithmetic on a string or a concat of a number. Catching it
   -- at setup() is the whole point of validating anything here.
@@ -354,6 +414,9 @@ function M.resolve(opts)
   end
   check(cfg.context_lines, "number", "context_lines")
   check(cfg.spinner_interval, "number", "spinner_interval")
+  check(cfg.prompt_highlight, "boolean", "prompt_highlight")
+  check(cfg.prompt_completion, "boolean", "prompt_completion")
+  check(cfg.replace_explain, "boolean", "replace_explain")
   check(cfg.language.context_lines, "number", "language.context_lines")
   check(cfg.language.source, "string", "language.source")
   check(cfg.language.target, "string", "language.target")

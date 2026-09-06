@@ -42,10 +42,17 @@ end
 --- controls how the answer is trimmed: prose is trimmed on both ends, code
 --- keeps the leading whitespace that is its indentation.
 ---
+--- `response_field_extra` names a SECOND JSON key alongside `response_field`,
+--- for an op that wants two things back at once under one grammar -- `replace`
+--- with a skill uses it for `{ replacement, explanation }`. Both keys are
+--- required; the extra one is unwrapped onto `result.extra`, always trimmed as
+--- prose regardless of `response_prose` (that flag governs the main field).
+---
 --- @class gerty.Prompt
 --- @field system string|nil instructions about the task, not the input
 --- @field user string the input the model acts on
 --- @field response_field string|nil JSON key to constrain and unwrap
+--- @field response_field_extra string|nil a second required key, unwrapped onto result.extra
 --- @field response_prose boolean|nil false for code answers; defaults true
 
 --- @class gerty.SendOpts
@@ -125,13 +132,19 @@ end
 --- outlives its reason and starts causing the failure it was meant to prevent.
 ---
 --- @param field string
---- @param prose boolean
+--- @param extra string|nil a second required string key
 --- @return table
-local function json_schema(field)
+local function json_schema(field, extra)
+  local properties = { [field] = { type = "string" } }
+  local required = { field }
+  if extra then
+    properties[extra] = { type = "string" }
+    required[#required + 1] = extra
+  end
   return {
     type = "object",
-    properties = { [field] = { type = "string" } },
-    required = { field },
+    properties = properties,
+    required = required,
     additionalProperties = false,
   }
 end
@@ -192,6 +205,7 @@ function M.decode_openai(raw, provider, prompt)
   -- Unwrap the schema's payload field. A server that ignored `response_format`
   -- hands back prose, which will not parse -- keep that as-is rather than
   -- failing, so the only cost of an unsupported endpoint is the old behaviour.
+  local extra
   local field = prompt.response_field
   if field then
     local decoded_ok, parsed = pcall(vim.json.decode, content)
@@ -200,6 +214,11 @@ function M.decode_openai(raw, provider, prompt)
       and type(parsed) == "table"
       and type(parsed[field]) == "string"
     then
+      local key = prompt.response_field_extra
+      if key and type(parsed[key]) == "string" then
+        local trimmed = vim.trim(parsed[key])
+        extra = trimmed ~= "" and trimmed or nil
+      end
       content = parsed[field]
     end
   end
@@ -220,7 +239,7 @@ function M.decode_openai(raw, provider, prompt)
   if content == "" then
     return fail("empty response")
   end
-  return { status = "ok", output = content }
+  return { status = "ok", output = content, extra = extra }
 end
 
 --- @param provider gerty.ResolvedProvider
@@ -246,7 +265,10 @@ local function send_openai(provider, prompt, opts)
       json_schema = {
         name = "gerty",
         strict = true,
-        schema = json_schema(prompt.response_field),
+        schema = json_schema(
+          prompt.response_field,
+          prompt.response_field_extra
+        ),
       },
     }
   end

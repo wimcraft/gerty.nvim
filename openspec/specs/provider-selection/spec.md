@@ -60,17 +60,68 @@ not name a configured provider SHALL be left in the instruction untouched.
 - **THEN** `$alias` is not the mechanism, because model ids such as `kilo/deepseek/deepseek-v4-pro` are impractical to type at a prompt
 - **AND** a per-call `model = "..."` or the model picker is used instead
 
+### Requirement: Numeric Provider Shorthand
+
+The system SHALL accept `$N`, where `N` is a positive integer, as a leading
+prompt token equivalent to naming the Nth provider in the sorted alias list.
+It SHALL resolve, be stripped, and fall through on no match by exactly the
+same rules as a named `$alias`, including the capability guard.
+
+#### Scenario: A number selects a provider by position
+
+- **WHEN** the user types `$2 rewrite this` and the sorted aliases are `claude, local, pi`
+- **THEN** the request runs on `local` and the instruction sent is `rewrite this`
+
+#### Scenario: An out-of-range number is not eaten
+
+- **WHEN** the user types `$9` with three providers configured
+- **THEN** no provider selection occurs and `$9` is left in the instruction, like any unrecognised `$token`
+
+### Requirement: Prompt Hotkeys
+
+The system SHALL provide `config.prompt_keys`, a map of keymap left-hand side
+to a provider alias or a 1-based index, empty by default. For the lifetime of
+a built-in text prompt, each entry SHALL be bound so that pressing it inserts
+the corresponding leading `$alias` token into the prompt. The bindings SHALL
+be removed, and any mapping they shadowed restored, when the prompt resolves.
+A user-supplied map SHALL replace the default rather than merge with it.
+
+#### Scenario: A hotkey inserts a routing token
+
+- **WHEN** the prompt is open and the user presses a key bound in `prompt_keys` to index 1
+- **THEN** the prompt text gains a leading `$<first-alias> ` and the user keeps typing the instruction
+
+#### Scenario: A second press does not stack
+
+- **WHEN** the prompt already begins with a `$` token and another hotkey is pressed
+- **THEN** the prompt text is left unchanged
+
+#### Scenario: An invalid binding is rejected at setup
+
+- **WHEN** `prompt_keys` contains a value that is neither a 1-based index nor a configured provider alias
+- **THEN** `setup()` fails with a message naming the offending key and the configured aliases
+
+#### Scenario: A prompt hotkey pointing past the provider list
+
+- **WHEN** `prompt_keys` maps a key to an index greater than the number of
+  configured providers
+- **THEN** `setup()` raises, rather than installing a key that would do nothing
+
 ### Requirement: Inline Reference Card
 
 The system SHALL display a static reference window beside any text prompt,
 listing the providers that can be named with `$alias` and the skills that can
-be named with `#name`. The card SHALL list one entry per line, and SHALL close
+be named with `/name`. The card SHALL list one entry per line, and SHALL close
 when the prompt resolves, whether it was submitted or cancelled.
+
+The live colouring and `<Tab>` completion of `$provider` tokens at the
+built-in prompt follow the same rules as `/skill` tokens; see the skills
+capability's *Prompt Token Feedback* requirement.
 
 #### Scenario: Card contents
 
 - **WHEN** a prompt opens with several providers configured
-- **THEN** each provider is listed as `$alias (current-model) [billing]`, in sorted order
+- **THEN** each provider is listed as `$N  $alias (current-model) [billing]`, in sorted order, where `N` is its position
 
 #### Scenario: Card is not a completion popup
 

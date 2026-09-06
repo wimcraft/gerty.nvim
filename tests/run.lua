@@ -13,6 +13,7 @@ local T = require("tests.helpers")
 
 local specs = {
   "config",
+  "prompt_tokens",
   "transport",
   "routing",
   "replace",

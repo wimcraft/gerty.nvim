@@ -123,6 +123,58 @@ T.test("list defaults are replaced, not merged", function()
   T.eq(cfg.dictionary.command[1], "trans")
 end)
 
+T.test("prompt_keys is off by default and accepts index or alias targets", function()
+  local cfg = config.resolve({ providers = { pi = {} } })
+  T.eq(next(cfg.prompt_keys), nil, "no hotkeys unless the user asks for them")
+  local on = config.resolve({
+    providers = { pi = {}, claude = {} },
+    prompt_keys = { ["<C-1>"] = 1, ["<C-x>l"] = "claude" },
+  })
+  T.eq(on.prompt_keys["<C-1>"], 1)
+  T.eq(on.prompt_keys["<C-x>l"], "claude")
+end)
+
+T.test("a prompt_keys target must be an index or a configured provider", function()
+  T.raises(function()
+    config.resolve({ providers = { pi = {} }, prompt_keys = { ["<C-1>"] = "nope" } })
+  end, "prompt_keys['<C-1>']")
+  T.raises(function()
+    config.resolve({ providers = { pi = {} }, prompt_keys = { ["<C-1>"] = 0 } })
+  end, "1-based provider index")
+  -- an index past the end would install a key that does nothing at all, which
+  -- is the silent failure the validation exists to prevent
+  T.raises(function()
+    config.resolve({
+      providers = { pi = {}, claude = {} },
+      prompt_keys = { ["<C-9>"] = 9 },
+    })
+  end, "(1-2)")
+end)
+
+T.test("replace_explain defaults on and rejects a non-boolean", function()
+  T.eq(config.resolve({ providers = { pi = {} } }).replace_explain, true)
+  T.eq(
+    config.resolve({ providers = { pi = {} }, replace_explain = false }).replace_explain,
+    false
+  )
+  T.raises(function()
+    config.resolve({ providers = { pi = {} }, replace_explain = "yes" })
+  end, "replace_explain must be a boolean")
+end)
+
+T.test("prompt_highlight / prompt_completion default true, reject non-boolean", function()
+  local cfg = config.resolve({ providers = { pi = {} } })
+  T.eq(cfg.prompt_highlight, true)
+  T.eq(cfg.prompt_completion, true)
+  T.eq(
+    config.resolve({ providers = { pi = {} }, prompt_completion = false }).prompt_completion,
+    false
+  )
+  T.raises(function()
+    config.resolve({ providers = { pi = {} }, prompt_highlight = "yes" })
+  end, "prompt_highlight must be a boolean")
+end)
+
 T.test("a custom type table is accepted", function()
   local cfg = config.resolve({
     providers = {
