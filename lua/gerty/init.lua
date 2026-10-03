@@ -10,6 +10,7 @@ local hint = require("gerty.hint")
 local Spinner = require("gerty.status")
 local float = require("gerty.float")
 local prompt_tokens = require("gerty.prompt_tokens")
+local prompt_history = require("gerty.prompt_history")
 
 local marks_ns = vim.api.nvim_create_namespace("gerty.marks")
 --- Persistent sign marking a line a translate/gloss answer covered -- unlike
@@ -621,6 +622,82 @@ local function install_prompt_keys()
   end
 end
 
+--- @param op "replace"|"explain"
+--- @param apply fun(instruction: string)
+local function select_prompt_history(op, apply)
+  local choices = prompt_history.list(op)
+  if #choices == 0 then
+    return
+  end
+  vim.ui.select(choices, {
+    prompt = "gerty: " .. op .. " history",
+  }, function(choice)
+    if choice then
+      apply(choice)
+    end
+  end)
+end
+
+--- Binds prompt history while the built-in vim.ui.input command line is active.
+--- @param op "replace"|"explain"
+--- @return fun() restores the mapping this temporarily shadows
+local function install_cmdline_history_picker(op)
+  local lhs = "<C-r>"
+  local shadowed = vim.fn.maparg(lhs, "c", false, true)
+  vim.keymap.set("c", lhs, function()
+    -- The selector is deliberately synchronous: scheduling it lets queued
+    -- keys submit the old prompt before the picker takes focus.
+    select_prompt_history(op, function(choice)
+      if vim.fn.getcmdtype() ~= "" then
+        vim.fn.setcmdline(choice, #choice + 1)
+      end
+    end)
+  end, { desc = "gerty: recall " .. op .. " prompt" })
+  return function()
+    pcall(vim.keymap.del, "c", lhs)
+    if not vim.tbl_isempty(shadowed) then
+      pcall(vim.fn.mapset, "c", false, shadowed)
+    end
+  end
+end
+
+--- A custom vim.ui.input usually opens an insert-mode buffer and returns
+--- immediately. Map that buffer, not the editor buffer that launched it.
+--- @param op "replace"|"explain"
+--- @param buf number
+--- @return fun() restores the buffer-local mapping
+local function install_insert_history_picker(op, buf)
+  local lhs = "<C-r>"
+  local shadowed = vim.api.nvim_buf_call(buf, function()
+    return vim.fn.maparg(lhs, "i", false, true)
+  end)
+  vim.keymap.set("i", lhs, function()
+    select_prompt_history(op, function(choice)
+      if not vim.api.nvim_buf_is_valid(buf) then
+        return
+      end
+      local win = vim.fn.bufwinid(buf)
+      if win == -1 then
+        return
+      end
+      local row = vim.api.nvim_win_get_cursor(win)[1]
+      vim.api.nvim_buf_set_lines(buf, row - 1, row, false, { choice })
+      vim.api.nvim_win_set_cursor(win, { row, #choice })
+    end)
+  end, { buffer = buf, desc = "gerty: recall " .. op .. " prompt" })
+  return function()
+    if not vim.api.nvim_buf_is_valid(buf) then
+      return
+    end
+    pcall(vim.keymap.del, "i", lhs, { buffer = buf })
+    if not vim.tbl_isempty(shadowed) then
+      vim.api.nvim_buf_call(buf, function()
+        pcall(vim.fn.mapset, "i", false, shadowed)
+      end)
+    end
+  end
+end
+
 --- The scanner context, rebuilt each prompt so a runtime provider or skill
 --- change is picked up.
 --- @return gerty.TokenContext
@@ -705,24 +782,30 @@ function _G.gerty_prompt_complete(arg_lead)
   return vim.list_extend(all, provider_items)
 end
 
---- vim.ui.input() with the `$alias`/`/skill` reference card alongside it, the
---- `prompt_keys` hotkeys bound for its lifetime, and -- on the built-in prompt
---- -- live token highlighting and `<Tab>` completion. The card closes and the
---- hotkeys are removed on submit *and* on cancel, because vim.ui.input calls
---- back either way.
----
---- `highlight`/`completion` are passed straight through to `vim.fn.input` by
---- the built-in `vim.ui.input`; dressing honours them too, snacks/noice
---- ignore them. `cancelreturn` is deliberately NOT set -- `vim.ui.input`
---- needs to own it to tell cancel from an empty submit.
+--- vim.ui.input() with the `$alias`/`/skill` reference card, temporary
+--- provider/history mappings, and -- on the built-in prompt -- live token
+--- highlighting and `<Tab>` completion. The history picker is command-line
+--- mapped for built-in input and buffer-local insert mapped for custom input.
 --- @param label string
 --- @param on_submit fun(instruction: string|nil)
-local function input_with_hint(label, on_submit)
+--- @param history_op "replace"|"explain"|nil
+local function input_with_hint(label, on_submit, history_op)
   local close = hint.open(hint_lines())
+  local source_buf = vim.api.nvim_get_current_buf()
   local restore_keys = install_prompt_keys()
+  local restore_cmdline = history_op and install_cmdline_history_picker(history_op)
+  local restore_insert
+  local alive = true
   local function teardown()
+    alive = false
     close()
     restore_keys()
+    if restore_cmdline then
+      restore_cmdline()
+    end
+    if restore_insert then
+      restore_insert()
+    end
   end
   local opts = { prompt = label }
   if cfg.prompt_highlight then
@@ -738,6 +821,20 @@ local function input_with_hint(label, on_submit)
   if not ok then
     teardown()
     error(err)
+  end
+  if history_op then
+    vim.schedule(function()
+      if not alive then
+        return
+      end
+      local input_buf = vim.api.nvim_get_current_buf()
+      if input_buf ~= source_buf and vim.api.nvim_buf_is_valid(input_buf) then
+        restore_insert = install_insert_history_picker(history_op, input_buf)
+        if not alive then
+          restore_insert()
+        end
+      end
+    end)
   end
 end
 
@@ -1447,11 +1544,12 @@ function M.replace(opts)
 
   local prompted, err = pcall(input_with_hint, "Replace: ", function(instruction)
     if instruction and vim.trim(instruction) ~= "" then
+      prompt_history.record("replace", instruction)
       do_replace(range, instruction, opts.model, opts.provider)
     else
       release_range(range)
     end
-  end)
+  end, "replace")
   if not prompted then
     release_range(range)
     error(err, 0)
@@ -1487,9 +1585,11 @@ function M.explain(opts)
     if vim.trim(instruction) == "" then
       instruction = "Explain what this code does, why it exists, and how it "
         .. "is used elsewhere in the repository."
+    else
+      prompt_history.record("explain", instruction)
     end
     do_explain(range, instruction, opts.model, opts.provider)
-  end)
+  end, "explain")
   if not prompted then
     release_range(range)
     error(err, 0)

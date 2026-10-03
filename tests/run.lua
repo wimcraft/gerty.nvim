@@ -10,9 +10,12 @@ vim.opt.runtimepath:prepend(root)
 package.path = root .. "/?.lua;" .. package.path
 
 local T = require("tests.helpers")
+local prompt_history_dir = vim.fn.tempname()
+require("gerty.prompt_history")._set_path_for_test(prompt_history_dir .. "/prompt-history.json")
 
 local specs = {
-  "config",
+  "prompt_history",
+  "prompt_history_ui",
   "prompt_tokens",
   "transport",
   "routing",
@@ -36,5 +39,6 @@ io.write(string.format("\n%d passed, %d failed  (%.1fs)\n", T.passed, #T.failure
 for _, failure in ipairs(T.failures) do
   io.write("  " .. failure.name .. ": " .. failure.err .. "\n")
 end
+vim.fn.delete(prompt_history_dir, "rf")
 
 os.exit(#T.failures == 0 and 0 or 1)

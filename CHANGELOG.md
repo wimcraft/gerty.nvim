@@ -4,6 +4,10 @@ Notable changes per release. Dates are ISO. This project is pre-1.0: minor versi
 
 ## [Unreleased]
 
+### Added
+
+- `replace` and `explain` now retain their submitted prompt text across Neovim restarts. Press `<C-r>` in either built-in or floating custom prompt to select an operation-specific earlier instruction, edit it if needed, then submit it against the current selection. Inline `$provider` / `$N` routing tokens are preserved. The local history lives at `stdpath("data")/gerty/prompt-history.json`.
+
 ### Fixed
 
 - The explanation float of a skilled `replace` no longer closes itself the moment it opens. When the replacement was shorter than the text under the cursor, Neovim's delayed `CursorMoved` for that clamp was mistaken for a user move; the float now only dismisses on a move away from where the edit left the cursor.

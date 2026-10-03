@@ -261,6 +261,27 @@ Available skills:
 
 On Neovim's built-in prompt (and dressing), `$provider` and `/skill` tokens are **coloured as you type** — one colour when they resolve, a warning colour when they don't (a typo, or a skill you haven't configured) — and `<Tab>` completes them: `/gr<Tab>` → `/grammar`, `$<Tab>` → the provider list, `<Tab>` on an empty prompt → everything. Turn either off with `prompt_highlight = false` / `prompt_completion = false`; restyle the colours with `:hi GertyPromptToken` / `:hi GertyPromptTokenUnknown`. snacks/noice prompts show neither (harmless — the reference card and the on-submit warning still work).
 
+### Prompt history
+
+`replace` and `explain` retain the non-empty instructions you submit, most
+recent first, in
+`stdpath("data")/gerty/prompt-history.json`. The file is local to your Neovim
+data directory and survives restarts; delete it if the history contains text
+you no longer want kept.
+
+At every Replace or Explain prompt, press `<C-r>` to choose an earlier
+instruction. Choosing it puts the exact text back in the prompt for editing or
+submission — it does not send a request on its own. Histories are separate for
+`replace` and `explain`, and `$alias` / `$N` tokens stay intact, so `$2
+translate to German` still routes the new selection to the same provider.
+Direct API calls with `instruction = ...` and Explain's built-in empty-submit
+question are not recorded.
+
+`<C-r>` works in Neovim's built-in command-line input and in floating custom
+`vim.ui.input` buffers such as dressing, snacks, or noice. In a custom prompt
+gerty temporarily replaces that buffer's normal register action and restores it
+when the prompt resolves. `prompt_keys` remain command-line-only.
+
 ### Prompt hotkeys
 
 `config.prompt_keys` binds a keypress at the prompt to inserting a leading `$alias` token, so you don't type it at all. It's **off by default** — `$N` already covers the common case with nothing to configure and nothing to go wrong. Opt in by mapping keys to providers:
@@ -372,4 +393,4 @@ Additionally runs three tests against a real OpenAI-compatible server (LM Studio
 
 ## What's intentionally not here
 
-No request history, no log viewer, no quickfix/search op, no telescope/fzf model picker, no `@file` completion and no completion *popup* (the prompt has `<Tab>` completion and live colouring for `$providers`/`/skills`, plus the static hint card — but no floating menu), no treesitter function-scope targeting (so `explain` takes a line-wise visual range — you select the function yourself). All were in the original; none survived the cut for v1. `replace` is also still deliberately line-based, unlike `translate`/`gloss`, which read the exact characterwise/blockwise selection. `openspec/specs/` records the reasoning as scenarios, and the open issues track what may yet change.
+No general request log or answer-history viewer, no quickfix/search op, no telescope/fzf model picker, no `@file` completion and no completion *popup* (the prompt has `<Tab>` completion and live colouring for `$providers`/`/skills`, plus the static hint card — but no floating menu), no treesitter function-scope targeting (so `explain` takes a line-wise visual range — you select the function yourself). All were in the original; none survived the cut for v1. `replace` is also still deliberately line-based, unlike `translate`/`gloss`, which read the exact characterwise/blockwise selection. `openspec/specs/` records the reasoning as scenarios, and the open issues track what may yet change.
