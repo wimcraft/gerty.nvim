@@ -283,6 +283,27 @@ T.test("the explanation float does not steal the cursor", function()
   T.ok(shown, "the explanation float did not open at all")
 end)
 
+T.test("the explanation float survives the edit's own cursor move", function()
+  -- A replacement shorter than the line under the cursor clamps the cursor,
+  -- and Neovim reports that as CursorMoved on a later main-loop pass -- after
+  -- the float has armed its dismiss. `nvim -l` never runs that pass, so fire
+  -- the event by hand, from where the edit left things.
+  local float = require("gerty.float")
+  local buf = T.buffer_with_selection({ "aa", "a much longer line here" }, 2, 2)
+  local edit_win = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_cursor(edit_win, { 2, 20 })
+  vim.api.nvim_buf_set_lines(buf, 1, 2, false, { "short" })
+
+  local win = float.show("t", "Fixed it.", { focus = false })
+  vim.wait(20)
+  vim.api.nvim_exec_autocmds("CursorMoved", {})
+  T.ok(vim.api.nvim_win_is_valid(win), "the edit's own clamp closed the float")
+
+  vim.api.nvim_win_set_cursor(edit_win, { 1, 0 })
+  vim.api.nvim_exec_autocmds("CursorMoved", {})
+  T.ok(not vim.api.nvim_win_is_valid(win), "a real cursor move should dismiss it")
+end)
+
 T.test("no skill means the request does not ask for an explanation", function()
   setup()
   history.clear()

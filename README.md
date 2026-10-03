@@ -358,7 +358,7 @@ If you implement `read_only`, **deny the shell too**, not just the edit tools: a
 make test        # or: nvim -l tests/run.lua
 ```
 
-118 tests, a few seconds, no dependencies — the suite needs nothing the plugin doesn't already need. Subprocesses are mocked, so nothing is spawned and no model is called.
+119 tests, a few seconds, no dependencies — the suite needs nothing the plugin doesn't already need. Subprocesses are mocked, so nothing is spawned and no model is called.
 
 ```bash
 make test-live   # or: GERTY_TEST_LIVE=1 nvim -l tests/run.lua

@@ -2,6 +2,12 @@
 
 Notable changes per release. Dates are ISO. This project is pre-1.0: minor versions may break things, and breaking changes are called out explicitly.
 
+## [Unreleased]
+
+### Fixed
+
+- The explanation float of a skilled `replace` no longer closes itself the moment it opens. When the replacement was shorter than the text under the cursor, Neovim's delayed `CursorMoved` for that clamp was mistaken for a user move; the float now only dismisses on a move away from where the edit left the cursor.
+
 ## [0.1.0] — 2026-09-07
 
 ### Breaking
