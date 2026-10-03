@@ -11,7 +11,7 @@ This is a deliberately stripped-down alternative to [ThePrimeagen/99](https://gi
 > This works and is used daily, but it is early. The config shape, the option names and the public API are all still moving, and **releases may break them without a deprecation period**. If that matters to you, pin a tag rather than tracking `main`:
 >
 > ```lua
-> { "rfist/gerty.nvim", tag = "v0.1.0" }
+> { "wimcraft/gerty.nvim", tag = "v0.1.0" }
 > ```
 >
 > Breaking changes will be called out in the release notes. `require("gerty").version` reports what you have installed.
@@ -60,7 +60,7 @@ If that is not what you want, don't map `ask`. `explain`, `translate` and `gloss
 
 ```lua
 {
-  "rfist/gerty.nvim",
+  "wimcraft/gerty.nvim",
   config = function()
     local gerty = require("gerty")
     gerty.setup({
